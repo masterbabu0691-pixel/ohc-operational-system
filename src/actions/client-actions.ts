@@ -3,12 +3,13 @@
 
 import { db } from "@/db";
 import { clients, agencies, clientPackages, services } from "@/db/schema";
+import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { revalidatePath } from "next/cache";
 
 // 1. Fetch all available clinical services
 export async function getMasterServices() {
-  return await db.select().from(services).where(services.isActive);
+  return await db.select().from(services).where(eq(services.isActive, true));
 }
 
 // 2. Create client, agencies, and dynamic service package
@@ -65,7 +66,6 @@ export async function createClientWithPackage(formData: {
     return { success: true, clientId };
   } catch (error: any) {
     console.error("Database error in createClientWithPackage:", error);
-    // Extract exact Postgres error message from error.cause if available
     const detailedMessage =
       error.cause?.message || error.detail || error.message || "Unknown database error";
     return { success: false, error: detailedMessage };
