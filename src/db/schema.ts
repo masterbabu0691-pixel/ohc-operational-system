@@ -7,10 +7,13 @@ export const roleEnum = pgEnum("role", [
   "CLIENT_HR",
   "CAMP_COORDINATOR",
   "RECEPTIONIST",
+  "NURSE",
+  "FIELD_DOCTOR",
+  "OFFICE_DOCTOR",
+  "DOCTOR_EXAMINER",
   "PHLEBOTOMIST",
   "LAB_TECHNICIAN",
   "DIAGNOSTIC_TECHNICIAN",
-  "DOCTOR_EXAMINER",
   "MRD_OFFICER"
 ]);
 
@@ -23,6 +26,7 @@ export const fitnessStatusEnum = pgEnum("fitness_status", [
 
 export const stationTypeEnum = pgEnum("station_type", [
   "REGISTRATION",
+  "NURSING_STATION",
   "VITALS_ANTHROPOMETRY",
   "PHLEBOTOMY",
   "PATHOLOGY_LAB",
@@ -31,7 +35,17 @@ export const stationTypeEnum = pgEnum("station_type", [
   "SPIROMETRY_PFT",
   "AUDIOMETRY",
   "VISION_SCREENING",
-  "DOCTOR_EXAMINATION"
+  "DOCTOR_EXAMINATION",
+  "FIELD_DOCTOR_EXAM",
+  "OFFICE_DOCTOR_REVIEW"
+]);
+
+export const stationArrivalStatusEnum = pgEnum("station_arrival_status", [
+  "PENDING",      // Checked in at reception, not yet at this desk
+  "ARRIVED",      // Standing in queue at this desk
+  "COMPLETED",    // Test finished
+  "SKIPPED",      // Intentionally bypassed
+  "NA"            // Not contracted for this employee
 ]);
 
 // 2. Clients & Agencies
@@ -56,7 +70,7 @@ export const agencies = pgTable("agencies", {
   createdAt: timestamp("created_at").defaultNow().notNull()
 });
 
-// 3. Dynamic Services & Client Packages
+// 3. Dynamic Services & Packages
 export const services = pgTable("services", {
   id: text("id").primaryKey(),
   code: text("code").notNull().unique(),
@@ -83,17 +97,16 @@ export const camps = pgTable("camps", {
   location: text("location").notNull(),
   startDate: date("start_date").notNull(),
   endDate: date("end_date").notNull(),
-  status: text("status").default("SCHEDULED").notNull(),
+  status: text("status").default("ACTIVE").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull()
 });
 
-// 5. Sequential UHID Sequence Tracker
 export const uhidSequence = pgTable("uhid_sequence", {
   year: integer("year").primaryKey(),
   currentVal: integer("current_val").default(0).notNull()
 });
 
-// 6. Employees (Patients)
+// 5. Employees: Multi-Hazard Profiling, Pre-Reg & Vitals Division
 export const employees = pgTable("employees", {
   id: text("id").primaryKey(),
   uhid: text("uhid").notNull().unique(),
@@ -107,11 +120,45 @@ export const employees = pgTable("employees", {
   age: integer("age").notNull(),
   department: text("department"),
   designation: text("designation"),
+  hazardProfile: text("hazard_profile").default("ROUTINE"),
+  assignedServiceIds: jsonb("assigned_service_ids").$type<string[]>(),
   phone: text("phone"),
   email: text("email"),
   bloodGroup: text("blood_group"),
   photoUrl: text("photo_url"),
-  barcode: text("barcode").unique(),
+  barcode: text("barcode"),
+  
+  // Phlebotomy Barcode Tracking (Anti-Duplicate)
+  labKitBarcode: text("lab_kit_barcode"),
+  bloodCollected: boolean("blood_collected").default(false).notNull(),
+  urineCollected: boolean("urine_collected").default(false).notNull(),
+  samplesCollectedAt: timestamp("samples_collected_at"),
+
+  // Reception Vitals (Locked to Reception)
+  heightCm: text("height_cm"),
+  weightKg: text("weight_kg"),
+  bmi: text("bmi"),
+
+  // Nurse Vitals
+  nurseBpSystolic: text("nurse_bp_systolic"),
+  nurseBpDiastolic: text("nurse_bp_diastolic"),
+  nursePulseBpm: text("nurse_pulse_bpm"),
+  nurseSpo2: text("nurse_spo2"),
+  nurseVisionDistanceRight: text("nurse_vision_dist_right"),
+  nurseVisionDistanceLeft: text("nurse_vision_dist_left"),
+  nurseVisionNearRight: text("nurse_vision_near_right"),
+  nurseVisionNearLeft: text("nurse_vision_near_left"),
+  nurseColorVision: text("nurse_color_vision"),
+  nurseRecordedAt: timestamp("nurse_recorded_at"),
+
+  // Field Doctor Re-write Overrides (BP, Pulse, SpO2 only)
+  doctorBpSystolic: text("doctor_bp_systolic"),
+  doctorBpDiastolic: text("doctor_bp_diastolic"),
+  doctorPulseBpm: text("doctor_pulse_bpm"),
+  doctorSpo2: text("doctor_spo2"),
+  doctorVitalsRewritten: boolean("doctor_vitals_rewritten").default(false).notNull(),
+
+  // Camp Gate Check-In Status
   checkInStatus: text("check_in_status").default("PRE_REGISTERED").notNull(),
   checkedInAt: timestamp("checked_in_at"),
   createdAt: timestamp("created_at").defaultNow().notNull()
@@ -120,34 +167,57 @@ export const employees = pgTable("employees", {
   uhidIdx: index("uhid_idx").on(table.uhid)
 }));
 
-// 7. Station Checklist & Diagnostic Records
+// 6. Station Checklist: With "Mark as Arrived" State
 export const stationChecklist = pgTable("station_checklist", {
   id: text("id").primaryKey(),
   employeeId: text("employee_id").references(() => employees.id).notNull(),
   campId: text("camp_id").references(() => camps.id).notNull(),
   station: stationTypeEnum("station").notNull(),
   status: text("status").default("PENDING").notNull(),
+  arrivalStatus: stationArrivalStatusEnum("arrival_status").default("PENDING").notNull(),
+  arrivedAt: timestamp("arrived_at"),
   completedAt: timestamp("completed_at"),
   completedBy: text("completed_by")
 });
 
+// 7. Diagnostic Records (Media captures, file uploads, reports)
 export const diagnosticRecords = pgTable("diagnostic_records", {
   id: text("id").primaryKey(),
   employeeId: text("employee_id").references(() => employees.id).notNull(),
   campId: text("camp_id").references(() => camps.id).notNull(),
-  serviceId: text("service_id").references(() => services.id).notNull(),
+  serviceId: text("service_id"),
+  serviceCode: text("service_code").default("SRV_GENERAL").notNull(),
   station: stationTypeEnum("station").notNull(),
   structuredData: jsonb("structured_data").notNull(),
   findingsSummary: text("findings_summary"),
   isAbnormal: boolean("is_abnormal").default(false).notNull(),
   attachmentUrls: jsonb("attachment_urls").$type<string[]>().default([]).notNull(),
+  capturedAfterCamp: boolean("captured_after_camp").default(false).notNull(),
   extractedViaOcr: boolean("extracted_via_ocr").default(false).notNull(),
   enteredBy: text("entered_by").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull()
 });
 
-// 8. Doctor Fitness Reviews & Sign-Off
+// 8. On-Field Doctor Physical Examination ONLY
+export const fieldDoctorExams = pgTable("field_doctor_exams", {
+  id: text("id").primaryKey(),
+  employeeId: text("employee_id").references(() => employees.id).notNull().unique(),
+  campId: text("camp_id").references(() => camps.id).notNull(),
+  doctorId: text("doctor_id").notNull(),
+  doctorName: text("doctor_name").notNull(),
+  cvsFinding: text("cvs_finding").default("S1 S2 Normal, No Murmurs").notNull(),
+  rsFinding: text("rs_finding").default("Bilateral Vesicular Breath Sounds Clear").notNull(),
+  abdomenFinding: text("abdomen_finding").default("Soft, No Organomegaly").notNull(),
+  cnsFinding: text("cns_finding").default("Reflexes Intact, Normal").notNull(),
+  musculoskeletal: text("musculoskeletal").default("Spine and joints range of motion normal").notNull(),
+  skinInspection: text("skin_inspection").default("Normal, No occupational dermatosis").notNull(),
+  herniaHydrocele: text("hernia_hydrocele").default("Absent").notNull(),
+  clinicalRemarks: text("clinical_remarks"),
+  examinedAt: timestamp("examined_at").defaultNow().notNull()
+});
+
+// 9. Doctor Reviews (Office Doctor & Final Legal Fitness Sign-Off)
 export const doctorReviews = pgTable("doctor_reviews", {
   id: text("id").primaryKey(),
   employeeId: text("employee_id").references(() => employees.id).notNull().unique(),
@@ -155,6 +225,16 @@ export const doctorReviews = pgTable("doctor_reviews", {
   doctorId: text("doctor_id").notNull(),
   doctorName: text("doctor_name").notNull(),
   doctorRegNo: text("doctor_reg_no").notNull(),
+  
+  // Panel-Specific Clinical Remarks (Office Doctor)
+  vitalsRemark: text("vitals_remark"),
+  labRemark: text("lab_remark"),
+  xrayRemark: text("xray_remark"),
+  pftRemark: text("pft_remark"),
+  audioRemark: text("audio_remark"),
+  fieldDoctorExamRemark: text("field_doctor_exam_remark"),
+
+  // Final Regulatory Determination
   fitnessStatus: fitnessStatusEnum("fitness_status").notNull(),
   followUpDate: date("follow_up_date"),
   clinicalNotes: text("clinical_notes"),
@@ -166,7 +246,7 @@ export const doctorReviews = pgTable("doctor_reviews", {
   createdAt: timestamp("created_at").defaultNow().notNull()
 });
 
-// 9. MRD Dossiers & Archival
+// 10. MRD Dossiers & Archival
 export const mrdDossiers = pgTable("mrd_dossiers", {
   id: text("id").primaryKey(),
   employeeId: text("employee_id").references(() => employees.id).notNull().unique(),
@@ -181,7 +261,27 @@ export const mrdDossiers = pgTable("mrd_dossiers", {
   createdAt: timestamp("created_at").defaultNow().notNull()
 });
 
-// 10. System Audit Logs
+// 11. System Users (RBAC)
+export const users = pgTable("users", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  role: roleEnum("role").default("RECEPTIONIST").notNull(),
+  assignedClientId: text("assigned_client_id").references(() => clients.id),
+  failedAttempts: integer("failed_attempts").default(0).notNull(),
+  lockedUntil: timestamp("locked_until"),
+  isActive: boolean("is_active").default(true).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull()
+});
+
+// 12. System Settings & Audit Logs
+export const systemSettings = pgTable("system_settings", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull()
+});
+
 export const auditLogs = pgTable("audit_logs", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
