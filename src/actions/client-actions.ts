@@ -15,11 +15,15 @@ export async function getMasterServices() {
 // 2. Create client, agencies, and dynamic service package
 export async function createClientWithPackage(formData: {
   name: string;
-  code: string;
+  code?: string;
   contactPerson?: string;
+  contactDesignation?: string;
+  contactDepartment?: string;
   email?: string;
   phone?: string;
   address?: string;
+  totalStrength?: string;
+  campMonth?: string;
   agenciesList: string[];
   packageName: string;
   selectedServiceIds: string[];
@@ -27,15 +31,43 @@ export async function createClientWithPackage(formData: {
   try {
     const clientId = `cli_${nanoid(10)}`;
 
+    // Auto-generate or guarantee unique client code
+    const baseCode = (
+      formData.code?.trim() ||
+      formData.name
+        .trim()
+        .replace(/[^a-zA-Z0-9\s]/g, "")
+        .split(/\s+/)
+        .slice(0, 2)
+        .join("-")
+    )
+      .toUpperCase()
+      .slice(0, 12) || "CLIENT";
+
+    let finalCode = baseCode;
+    const existingCode = await db
+      .select({ id: clients.id })
+      .from(clients)
+      .where(eq(clients.code, finalCode))
+      .limit(1);
+
+    if (existingCode.length > 0 || !formData.code?.trim()) {
+      finalCode = `${baseCode}-${nanoid(4).toUpperCase()}`;
+    }
+
     // 1. Insert Client with explicit nulls for optional fields
     await db.insert(clients).values({
       id: clientId,
       name: formData.name.trim(),
-      code: formData.code.toUpperCase().trim(),
+      code: finalCode,
       contactPerson: formData.contactPerson?.trim() || null,
+      contactDesignation: formData.contactDesignation?.trim() || null,
+      contactDepartment: formData.contactDepartment?.trim() || null,
       email: formData.email?.trim() || null,
       phone: formData.phone?.trim() || null,
       address: formData.address?.trim() || null,
+      totalStrength: formData.totalStrength?.trim() || null,
+      campMonth: formData.campMonth?.trim() || null,
       isActive: true,
     });
 
@@ -63,7 +95,7 @@ export async function createClientWithPackage(formData: {
     });
 
     revalidatePath("/clients");
-    return { success: true, clientId };
+    return { success: true, clientId, clientCode: finalCode };
   } catch (error: any) {
     console.error("Database error in createClientWithPackage:", error);
     const detailedMessage =

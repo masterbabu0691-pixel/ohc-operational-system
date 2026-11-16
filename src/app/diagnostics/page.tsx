@@ -1,40 +1,49 @@
 // src/app/diagnostics/page.tsx
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { getCampsList } from "@/actions/camp-actions";
-import { 
-  getStationQueue, 
-  lookupEmployeeByBarcode, 
-  markDiagnosticArrived, 
-  saveDiagnosticResult 
+import {
+  getDiagnosticTechnicianScope,
+  getStationQueue,
+  lookupEmployeeByBarcode,
+  markDiagnosticArrived,
+  saveDiagnosticResult,
 } from "@/actions/diagnostic-actions";
-import { 
-  Stethoscope, 
-  Barcode, 
-  Activity, 
-  FileText, 
-  Heart, 
-  Headphones, 
-  Camera, 
-  Upload, 
-  Check, 
-  X, 
-  Search, 
-  Building2, 
-  CheckCircle2, 
-  Clock, 
-  UserCheck, 
-  AlertTriangle 
+import { requestCorrectionUnlock } from "@/actions/clinical-actions";
+import {
+  Stethoscope,
+  Barcode,
+  Activity,
+  FileText,
+  Heart,
+  Headphones,
+  Camera,
+  Upload,
+  Check,
+  X,
+  Building2,
+  CheckCircle2,
+  Clock,
+  Lock,
 } from "lucide-react";
 import { BackButton } from "@/components/shared/BackButton";
 
 type StationKey = "SPIROMETRY_PFT" | "AUDIOMETRY" | "ECG" | "CHEST_XRAY";
 
-export default function DiagnosticsPage() {
+const VALID_STATIONS: StationKey[] = ["SPIROMETRY_PFT", "AUDIOMETRY", "ECG", "CHEST_XRAY"];
+
+function DiagnosticsContent() {
+  const searchParams = useSearchParams();
+  const urlStation = searchParams.get("station") as StationKey | null;
+
   const [camps, setCamps] = useState<any[]>([]);
   const [selectedCampId, setSelectedCampId] = useState("");
-  const [activeStation, setActiveStation] = useState<StationKey>("SPIROMETRY_PFT");
+  const [activeStation, setActiveStation] = useState<StationKey>(
+    urlStation && VALID_STATIONS.includes(urlStation) ? urlStation : "SPIROMETRY_PFT"
+  );
+  const [allowedStation, setAllowedStation] = useState<StationKey | null>(null);
   const [queue, setQueue] = useState<any[]>([]);
   const [selectedEmp, setSelectedEmp] = useState<any | null>(null);
   const [barcodeInput, setBarcodeInput] = useState("");
@@ -47,8 +56,6 @@ export default function DiagnosticsPage() {
   const [findingsSummary, setFindingsSummary] = useState("");
   const [isAbnormal, setIsAbnormal] = useState(false);
   const [capturedAfterCamp, setCapturedAfterCamp] = useState(false);
-
-  // Local Arrival Status tracker for selected employee
   const [isArrived, setIsArrived] = useState(false);
 
   const barcodeInputRef = useRef<HTMLInputElement | null>(null);
@@ -56,11 +63,29 @@ export default function DiagnosticsPage() {
   const streamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
+    if (urlStation && VALID_STATIONS.includes(urlStation) && !allowedStation) {
+      setActiveStation(urlStation);
+    }
+  }, [urlStation, allowedStation]);
+
+  useEffect(() => {
     async function load() {
-      const campData = await getCampsList();
+      const [campData, scope] = await Promise.all([
+        getCampsList(),
+        getDiagnosticTechnicianScope(),
+      ]);
       setCamps(campData);
       if (campData.length > 0 && !selectedCampId) {
         setSelectedCampId(campData[0].id);
+      }
+      if (
+        scope.role === "DIAGNOSTIC_TECHNICIAN" &&
+        scope.assignedStation &&
+        VALID_STATIONS.includes(scope.assignedStation as StationKey)
+      ) {
+        const lockedStation = scope.assignedStation as StationKey;
+        setAllowedStation(lockedStation);
+        setActiveStation(lockedStation);
       }
     }
     load();
@@ -70,9 +95,11 @@ export default function DiagnosticsPage() {
     if (!selectedCampId) return;
     const q = await getStationQueue(selectedCampId, activeStation);
     setQueue(q);
-    if (q.length > 0 && !selectedEmp) {
-      const firstPending = q.find((item) => item.checklistStatus === "PENDING") || q[0];
-      handleSelectEmployee(firstPending);
+    if (selectedEmp) {
+      const updated = q.find(
+        (item) => item.employeeId === (selectedEmp.employeeId || selectedEmp.id)
+      );
+      if (updated) handleSelectEmployee(updated);
     }
   };
 
@@ -81,7 +108,6 @@ export default function DiagnosticsPage() {
     barcodeInputRef.current?.focus();
   }, [selectedCampId, activeStation]);
 
-  // Set default findings per station
   useEffect(() => {
     if (activeStation === "SPIROMETRY_PFT") {
       setFindingsSummary("FEV1/FVC Ratio > 75%, Normal Flow-Volume curve, No airway obstruction.");
@@ -102,22 +128,40 @@ export default function DiagnosticsPage() {
     setAttachmentPreview(null);
   };
 
-  // 1. Mark as Arrived: Unlocks the file upload & photo uploader
-  const handleMarkArrivedClick = async () => {
+  const handleToggleArrivedClick = async () => {
     if (!selectedEmp) return;
-    setIsArrived(true);
-
-    await markDiagnosticArrived(
+    const res = await markDiagnosticArrived(
       selectedEmp.id || selectedEmp.employeeId,
       selectedCampId,
       activeStation
     );
-
-    setSuccessBanner(`${selectedEmp.fullName} marked as ARRIVED at ${activeStation.replace("_", " ")}! Uploader unlocked.`);
-    loadQueue();
+    if (res.success) {
+      const nowArrived = res.arrivalStatus === "ARRIVED";
+      setIsArrived(nowArrived);
+      setSuccessBanner(
+        nowArrived
+          ? `${selectedEmp.fullName} marked as ARRIVED! Uploader unlocked.`
+          : `${selectedEmp.fullName} reverted to Pending.`
+      );
+      loadQueue();
+    }
   };
 
-  // Hardware Barcode Scan lookup
+  const handleRequestUnlock = async () => {
+    if (!selectedEmp) return;
+    const reason = prompt(`Why does ${selectedEmp.fullName}'s ${activeStation} entry need correction?`);
+    if (!reason?.trim()) return;
+    const res = await requestCorrectionUnlock({
+      campId: selectedCampId,
+      employeeId: selectedEmp.id || selectedEmp.employeeId,
+      station: activeStation,
+      reason,
+    });
+    if (res.success) {
+      setSuccessBanner("Unlock request sent to Camp Coordinator Desk.");
+    }
+  };
+
   const handleBarcodeScan = async (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter" && barcodeInput.trim()) {
       e.preventDefault();
@@ -132,7 +176,6 @@ export default function DiagnosticsPage() {
     }
   };
 
-  // WebRTC Device Camera
   const startCamera = async () => {
     try {
       setCameraActive(true);
@@ -143,7 +186,7 @@ export default function DiagnosticsPage() {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
       }
-    } catch (err) {
+    } catch {
       alert("Unable to open device camera. You can browse and upload a file directly.");
       setCameraActive(false);
     }
@@ -165,8 +208,7 @@ export default function DiagnosticsPage() {
     const ctx = canvas.getContext("2d");
     if (ctx) {
       ctx.drawImage(videoRef.current, 0, 0, 640, 480);
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
-      setAttachmentPreview(dataUrl);
+      setAttachmentPreview(canvas.toDataURL("image/jpeg", 0.85));
       stopCamera();
     }
   };
@@ -174,30 +216,15 @@ export default function DiagnosticsPage() {
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     const reader = new FileReader();
-    reader.onload = (evt) => {
-      setAttachmentPreview(evt.target?.result as string);
-    };
+    reader.onload = (evt) => setAttachmentPreview(evt.target?.result as string);
     reader.readAsDataURL(file);
   };
-
-  // Keyboard shortcut: Ctrl + Enter = Save & Next
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-        e.preventDefault();
-        handleSaveAndNext();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  });
 
   const handleSaveAndNext = async () => {
     if (!selectedEmp) return;
     if (!isArrived) {
-      alert("Please click 'Mark as Arrived' before saving test results.");
+      alert("Please click 'Mark As Arrived' before saving test results.");
       return;
     }
 
@@ -221,10 +248,9 @@ export default function DiagnosticsPage() {
     if (res.success) {
       setSuccessBanner(`Saved for ${selectedEmp.fullName}! Advancing to next patient...`);
       const currentIndex = queue.findIndex(
-        (item) => (item.employeeId || item.id) === (selectedEmp.id || selectedEmp.employeeId)
+        (item) => item.employeeId === (selectedEmp.id || selectedEmp.employeeId)
       );
       const nextPending = queue.slice(currentIndex + 1).find((item) => item.checklistStatus === "PENDING");
-
       if (nextPending) {
         handleSelectEmployee(nextPending);
       } else {
@@ -234,24 +260,26 @@ export default function DiagnosticsPage() {
       loadQueue();
       barcodeInputRef.current?.focus();
     } else {
-      alert("Error saving result: " + res.error);
+      alert(res.error || "Error saving result");
     }
   };
 
-  const stationsList: { key: StationKey; name: string; icon: any }[] = [
+  const allStations: { key: StationKey; name: string; icon: any }[] = [
     { key: "SPIROMETRY_PFT", name: "Spirometry (PFT)", icon: Activity },
     { key: "AUDIOMETRY", name: "Audiometry (Audio)", icon: Headphones },
     { key: "ECG", name: "12-Lead ECG", icon: Heart },
     { key: "CHEST_XRAY", name: "Chest X-Ray", icon: FileText },
   ];
 
+  const visibleStations = allowedStation
+    ? allStations.filter((s) => s.key === allowedStation)
+    : allStations;
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-4 sm:p-6 md:p-8 space-y-6">
       <div className="max-w-7xl mx-auto space-y-6">
-        
         <BackButton fallbackHref="/admin" label="Back to Dashboard" />
 
-        {/* Header Bar with Client-Wise Camp Selector & Barcode Box */}
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 border-b border-slate-200 pb-4">
           <div>
             <div className="flex items-center space-x-2 text-[#008C8C] font-bold text-xs uppercase tracking-wider">
@@ -261,9 +289,6 @@ export default function DiagnosticsPage() {
             <h1 className="text-2xl font-black text-[#002642] tracking-tight mt-0.5">
               Diagnostic Stations (PFT, Audio, ECG, X-Ray)
             </h1>
-            <p className="text-xs text-slate-500">
-              Only arrived employees can upload files or record impressions. Bypasses unarrived workers.
-            </p>
           </div>
 
           <div className="flex items-center space-x-3">
@@ -276,7 +301,7 @@ export default function DiagnosticsPage() {
                 value={barcodeInput}
                 onChange={(e) => setBarcodeInput(e.target.value)}
                 onKeyDown={handleBarcodeScan}
-                className="pl-9 pr-3 py-2 bg-white border-2 border-indigo-500 rounded-xl text-xs font-mono font-bold focus:outline-none focus:ring-2 focus:ring-indigo-600 w-60 shadow-xs"
+                className="pl-9 pr-3 py-2 bg-white border-2 border-indigo-500 rounded-xl text-xs font-mono font-bold focus:outline-none w-60 shadow-xs"
               />
             </div>
 
@@ -294,9 +319,9 @@ export default function DiagnosticsPage() {
           </div>
         </div>
 
-        {/* Station Navigation Tabs */}
+        {/* Station Navigation Tabs (RBAC Filtered) */}
         <div className="flex space-x-2 border-b border-slate-200 overflow-x-auto pb-1">
-          {stationsList.map((stn) => {
+          {visibleStations.map((stn) => {
             const Icon = stn.icon;
             const isActive = activeStation === stn.key;
             return (
@@ -328,10 +353,8 @@ export default function DiagnosticsPage() {
           </div>
         )}
 
-        {/* Main 2-Column Workstation */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
-          {/* Left Column: Station Queue with Agency Names */}
+          {/* Queue */}
           <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-3">
             <div className="flex items-center justify-between text-xs font-bold text-slate-600 uppercase tracking-wider pb-2 border-b border-slate-100">
               <span>{activeStation.replace("_", " ")} Queue ({queue.length})</span>
@@ -342,7 +365,7 @@ export default function DiagnosticsPage() {
 
             <div className="space-y-2 max-h-[550px] overflow-y-auto pr-1">
               {queue.map((item) => {
-                const isSelected = (selectedEmp?.id || selectedEmp?.employeeId) === (item.employeeId || item.id);
+                const isSelected = (selectedEmp?.id || selectedEmp?.employeeId) === item.employeeId;
                 const isDone = item.checklistStatus === "COMPLETED";
                 const isItemArrived = item.arrivalStatus === "ARRIVED";
 
@@ -351,15 +374,12 @@ export default function DiagnosticsPage() {
                     key={item.employeeId || item.uhid}
                     onClick={() => handleSelectEmployee(item)}
                     className={`p-3 rounded-xl border text-xs cursor-pointer transition flex items-center justify-between ${
-                      isSelected
-                        ? "border-[#008C8C] bg-teal-50/50"
-                        : "border-slate-200 hover:border-slate-300 bg-white"
+                      isSelected ? "border-[#008C8C] bg-teal-50/50" : "border-slate-200 hover:border-slate-300 bg-white"
                     }`}
                   >
                     <div className="space-y-0.5 truncate max-w-[170px]">
                       <div className="font-bold text-[#002642] truncate">{item.fullName}</div>
                       <div className="text-[11px] font-mono text-teal-700">{item.uhid}</div>
-                      {/* Agency Name Displayed Prominently */}
                       <div className="text-[10px] font-bold text-indigo-700 flex items-center space-x-1 truncate">
                         <Building2 className="w-3 h-3 shrink-0" />
                         <span className="truncate">{item.agencyName || "Direct Payroll"}</span>
@@ -372,8 +392,8 @@ export default function DiagnosticsPage() {
                           <CheckCircle2 className="w-3.5 h-3.5 mr-1" /> Done
                         </span>
                       ) : isItemArrived ? (
-                        <span className="text-blue-600 font-bold flex items-center text-[10px]">
-                          <UserCheck className="w-3.5 h-3.5 mr-1" /> Arrived
+                        <span className="px-2 py-0.5 rounded bg-blue-600 text-white font-bold flex items-center text-[10px]">
+                          Arrived
                         </span>
                       ) : (
                         <span className="text-slate-400 flex items-center text-[10px]">
@@ -384,174 +404,139 @@ export default function DiagnosticsPage() {
                   </div>
                 );
               })}
-
-              {queue.length === 0 && (
-                <div className="text-center py-12 text-xs text-slate-400">
-                  No patients assigned to {activeStation.replace("_", " ")} in this camp.
-                </div>
-              )}
             </div>
           </div>
 
-          {/* Right Column: Workstation Card */}
+          {/* Right Workstation */}
           <div className="lg:col-span-2 bg-white border border-slate-200 rounded-2xl p-6 shadow-xs flex flex-col justify-between space-y-6">
             {selectedEmp ? (
-              <div className="space-y-6">
-                
-                {/* Employee Identification Card */}
+              <div className="space-y-5">
                 <div className="flex items-center justify-between p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
                   <div>
                     <div className="text-sm font-bold text-[#002642]">{selectedEmp.fullName}</div>
                     <div className="text-slate-500 font-mono">
-                      UHID: <span className="font-semibold text-teal-700">{selectedEmp.uhid}</span> • Code: {selectedEmp.empCode}
+                      UHID: <span className="font-semibold text-teal-700">{selectedEmp.uhid}</span> | Code: {selectedEmp.empCode}
                     </div>
-                    {/* Agency Name Always Visible */}
                     <div className="text-indigo-700 font-bold flex items-center space-x-1 mt-0.5">
                       <Building2 className="w-3.5 h-3.5 text-indigo-600" />
                       <span>Agency: {selectedEmp.agencyName || "Direct Payroll"}</span>
                     </div>
                   </div>
 
-                  {/* Arrived Action / Status */}
-                  <div className="text-right">
-                    {isArrived ? (
-                      <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200">
-                        <UserCheck className="w-3.5 h-3.5 mr-1" />
-                        Patient Arrived
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={handleMarkArrivedClick}
-                        className="px-4 py-2 bg-[#002642] hover:bg-[#001e38] text-white text-xs font-bold rounded-xl shadow-xs transition"
-                      >
-                        Mark as Arrived
-                      </button>
-                    )}
-                  </div>
+                  {selectedEmp.checklistStatus !== "COMPLETED" && (
+                    <button
+                      type="button"
+                      onClick={handleToggleArrivedClick}
+                      className={`px-4 py-2 text-white text-xs font-bold rounded-xl shadow-xs transition ${
+                        isArrived ? "bg-blue-600 hover:bg-blue-700" : "bg-[#002642] hover:bg-[#001e38]"
+                      }`}
+                    >
+                      {isArrived ? "Arrived" : "Mark As Arrived"}
+                    </button>
+                  )}
                 </div>
 
-                {/* CONDITIONAL RENDER: If NOT Arrived ➔ Keep Locked */}
+                {/* Reception Height, Weight & BMI Banner */}
+                <div className="p-3 bg-teal-50 border border-teal-200 rounded-xl text-xs flex items-center justify-between">
+                  <span className="font-bold text-teal-900">Reception Height, Weight & BMI:</span>
+                  <span className="font-mono font-bold text-teal-800">
+                    {selectedEmp.heightCm || "-"} cm / {selectedEmp.weightKg || "-"} kg (BMI: {selectedEmp.bmi || "-"})
+                  </span>
+                </div>
+
+                {selectedEmp.isLocked && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between text-xs">
+                    <span className="flex items-center space-x-2 font-bold text-amber-900">
+                      <Lock className="w-4 h-4 text-amber-600" />
+                      <span>Entry Locked after save.</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleRequestUnlock}
+                      className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold"
+                    >
+                      Request Coordinator Unlock
+                    </button>
+                  </div>
+                )}
+
                 {!isArrived ? (
                   <div className="p-8 border-2 border-dashed border-slate-200 rounded-xl text-center space-y-3 bg-slate-50/60">
                     <Clock className="w-8 h-8 text-slate-400 mx-auto" />
-                    <div>
-                      <div className="text-xs font-bold text-slate-700">Waiting for Employee Arrival</div>
-                      <p className="text-[11px] text-slate-400 mt-0.5 max-w-sm mx-auto">
-                        This employee has checked in at reception but has not arrived at the {activeStation.replace("_", " ")} station yet. Click <strong>Mark as Arrived</strong> above when they step up to unlock photo & file capture.
-                      </p>
-                    </div>
+                    <div className="text-xs font-bold text-slate-700">Waiting for Employee Arrival</div>
                     <button
                       type="button"
-                      onClick={handleMarkArrivedClick}
+                      onClick={handleToggleArrivedClick}
                       className="px-5 py-2 bg-[#008C8C] hover:bg-[#006e6e] text-white text-xs font-bold rounded-xl shadow-xs"
                     >
-                      Patient is Here (Mark as Arrived)
+                      Mark As Arrived
                     </button>
                   </div>
                 ) : (
-                  /* UNLOCKED: Individual Photo & File Upload Area */
-                  <div className="space-y-6 animate-in fade-in zoom-in-95">
-                    {/* Findings Input */}
+                  <div className="space-y-5">
                     <div className="space-y-1">
                       <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
-                        {activeStation.replace("_", " ")} Clinical Findings / Impression *
+                        {activeStation.replace("_", " ")} Clinical Findings *
                       </label>
                       <textarea
                         rows={3}
-                        required
+                        disabled={selectedEmp.isLocked}
                         value={findingsSummary}
                         onChange={(e) => setFindingsSummary(e.target.value)}
-                        className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs text-slate-900 font-medium outline-none focus:border-[#008C8C]"
+                        className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs text-slate-900 font-medium outline-none"
                       />
                     </div>
 
-                    {/* Media Upload / Photo Capture Box */}
                     <div className="space-y-2">
                       <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
-                        Attach Film / Waveform / Report Slip (Camera Snapshot or File)
+                        Attach Film / Waveform / Report Slip
                       </label>
-
                       {cameraActive ? (
                         <div className="relative aspect-video bg-black rounded-xl overflow-hidden max-w-md mx-auto">
                           <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
                           <div className="absolute bottom-3 inset-x-0 flex justify-center space-x-2">
-                            <button
-                              type="button"
-                              onClick={capturePhoto}
-                              className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow flex items-center space-x-1"
-                            >
-                              <Camera className="w-3.5 h-3.5" />
-                              <span>Snap Photo</span>
+                            <button type="button" onClick={capturePhoto} className="px-4 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-bold">
+                              Snap Photo
                             </button>
-                            <button
-                              type="button"
-                              onClick={stopCamera}
-                              className="px-3 py-1.5 bg-slate-800 text-white rounded-lg text-xs font-semibold"
-                            >
+                            <button type="button" onClick={stopCamera} className="px-3 py-1.5 bg-slate-800 text-white rounded-lg text-xs font-semibold">
                               Cancel
                             </button>
                           </div>
                         </div>
                       ) : attachmentPreview ? (
                         <div className="relative border-2 border-teal-500 rounded-xl p-2 bg-slate-50 max-w-sm">
-                          <img src={attachmentPreview} alt="Report preview" className="w-full h-40 object-contain rounded-lg bg-black/5" />
-                          <button
-                            type="button"
-                            onClick={() => setAttachmentPreview(null)}
-                            className="absolute top-3 right-3 p-1 bg-rose-600 text-white rounded-full hover:bg-rose-700"
-                            title="Remove file"
-                          >
+                          <img src={attachmentPreview} alt="Report preview" className="w-full h-40 object-contain rounded-lg" />
+                          <button type="button" onClick={() => setAttachmentPreview(null)} className="absolute top-3 right-3 p-1 bg-rose-600 text-white rounded-full">
                             <X className="w-3.5 h-3.5" />
                           </button>
-                          <div className="text-[10px] text-teal-800 font-bold text-center mt-1.5">
-                            ✓ Report attached & ready to submit
-                          </div>
                         </div>
                       ) : (
                         <div className="flex flex-col sm:flex-row items-center gap-3">
                           <button
                             type="button"
+                            disabled={selectedEmp.isLocked}
                             onClick={startCamera}
-                            className="w-full sm:w-auto px-4 py-2.5 bg-teal-50 border border-teal-200 hover:bg-teal-100 text-teal-800 rounded-xl text-xs font-bold flex items-center justify-center space-x-2 transition"
+                            className="w-full sm:w-auto px-4 py-2.5 bg-teal-50 border border-teal-200 text-teal-800 rounded-xl text-xs font-bold flex items-center justify-center space-x-2"
                           >
                             <Camera className="w-4 h-4 text-teal-600" />
                             <span>Take Photo with Camera</span>
                           </button>
-
-                          <label className="w-full sm:w-auto px-4 py-2.5 bg-slate-100 border border-slate-300 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center justify-center space-x-2 cursor-pointer transition">
+                          <label className="w-full sm:w-auto px-4 py-2.5 bg-slate-100 border border-slate-300 text-slate-700 rounded-xl text-xs font-bold flex items-center justify-center space-x-2 cursor-pointer">
                             <Upload className="w-4 h-4 text-slate-500" />
                             <span>Browse Film / Strip File</span>
-                            <input
-                              type="file"
-                              accept="image/*,application/pdf"
-                              onChange={handleFileUpload}
-                              className="hidden"
-                            />
+                            <input type="file" accept="image/*,application/pdf" onChange={handleFileUpload} className="hidden" />
                           </label>
                         </div>
                       )}
                     </div>
 
-                    {/* Toggles */}
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-slate-100 text-xs">
                       <label className="flex items-center space-x-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={isAbnormal}
-                          onChange={(e) => setIsAbnormal(e.target.checked)}
-                          className="w-4 h-4 rounded text-rose-600"
-                        />
+                        <input type="checkbox" checked={isAbnormal} onChange={(e) => setIsAbnormal(e.target.checked)} className="w-4 h-4 rounded text-rose-600" />
                         <span className="font-bold text-rose-700">Flag as Abnormal for Doctor Review</span>
                       </label>
-
                       <label className="flex items-center space-x-2 cursor-pointer text-slate-500">
-                        <input
-                          type="checkbox"
-                          checked={capturedAfterCamp}
-                          onChange={(e) => setCapturedAfterCamp(e.target.checked)}
-                          className="w-4 h-4 rounded text-indigo-600"
-                        />
+                        <input type="checkbox" checked={capturedAfterCamp} onChange={(e) => setCapturedAfterCamp(e.target.checked)} className="w-4 h-4 rounded text-indigo-600" />
                         <span className="text-[11px]">Uploaded Post-Camp (Batch Sync)</span>
                       </label>
                     </div>
@@ -564,38 +549,38 @@ export default function DiagnosticsPage() {
               </div>
             )}
 
-            {/* Bottom Action Bar */}
-            <div className="pt-4 border-t border-slate-200 flex items-center justify-between">
-              <div className="text-[11px] text-slate-400">
-                <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded border">Ctrl + Enter</span> to Save & Next
-              </div>
-
-              <div className="flex space-x-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedEmp(null);
-                    setIsArrived(false);
-                  }}
-                  className="px-4 py-2 border border-slate-300 rounded-xl text-xs font-medium text-slate-600 hover:bg-slate-50"
-                >
-                  Clear
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleSaveAndNext}
-                  disabled={!selectedEmp || !isArrived || isSaving}
-                  className="px-6 py-2 bg-[#008C8C] hover:bg-[#006e6e] text-white rounded-xl text-xs font-bold shadow-sm transition flex items-center space-x-1.5 disabled:opacity-50"
-                >
-                  <Check className="w-4 h-4" />
-                  <span>{isSaving ? "Saving..." : "Save & Next (Ctrl+Enter)"}</span>
-                </button>
-              </div>
+            <div className="pt-4 border-t border-slate-200 flex items-center justify-end space-x-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedEmp(null);
+                  setIsArrived(false);
+                }}
+                className="px-4 py-2 border border-slate-300 rounded-xl text-xs font-medium text-slate-600"
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveAndNext}
+                disabled={!selectedEmp || !isArrived || isSaving || selectedEmp?.isLocked}
+                className="px-6 py-2 bg-[#008C8C] hover:bg-[#006e6e] text-white rounded-xl text-xs font-bold shadow-sm disabled:opacity-50 flex items-center space-x-1.5"
+              >
+                <Check className="w-4 h-4" />
+                <span>{isSaving ? "Saving..." : "Save & Next"}</span>
+              </button>
             </div>
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+export default function DiagnosticsPage() {
+  return (
+    <Suspense fallback={<div className="p-8 text-xs text-slate-500">Loading Diagnostic Desk...</div>}>
+      <DiagnosticsContent />
+    </Suspense>
   );
 }

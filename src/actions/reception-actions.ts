@@ -2,15 +2,16 @@
 "use server";
 
 import { db } from "@/db";
-import { 
-  employees, 
-  camps, 
-  clientPackages, 
-  agencies, 
-  stationChecklist, 
-  stationTypeEnum 
+import {
+  employees,
+  camps,
+  clientPackages,
+  agencies,
+  services,
+  stationChecklist,
+  stationTypeEnum,
 } from "@/db/schema";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { nanoid } from "nanoid";
 
@@ -30,6 +31,13 @@ export async function getCampReceptionList(campId: string) {
         phone: employees.phone,
         bloodGroup: employees.bloodGroup,
         photoUrl: employees.photoUrl,
+        heightCm: employees.heightCm,
+        weightKg: employees.weightKg,
+        bmi: employees.bmi,
+        hazardProfile: employees.hazardProfile,
+        assignedServiceIds: employees.assignedServiceIds,
+        specialContainerRequired: employees.specialContainerRequired,
+        specialContainerName: employees.specialContainerName,
         checkInStatus: employees.checkInStatus,
         checkedInAt: employees.checkedInAt,
         agencyId: employees.agencyId,
@@ -45,14 +53,158 @@ export async function getCampReceptionList(campId: string) {
   }
 }
 
-// 2. Perform Camp Check-In: Atomic UHID & Strict Contracted-Stations Checklist
+// 2. Fetch camp's contracted package services & client agencies for Special Assign Desk / Walk-In
+export async function getCampPackageAndAgencies(campId: string) {
+  try {
+    const campRows = await db
+      .select({
+        id: camps.id,
+        clientId: camps.clientId,
+        packageId: camps.packageId,
+      })
+      .from(camps)
+      .where(eq(camps.id, campId))
+      .limit(1);
+
+    if (campRows.length === 0) {
+      return { agencies: [], packageServices: [], allServices: [] };
+    }
+
+    const { clientId, packageId } = campRows[0];
+
+    const [clientAgencies, pkgRows, allActiveServices] = await Promise.all([
+      db.select().from(agencies).where(eq(agencies.clientId, clientId)),
+      db.select().from(clientPackages).where(eq(clientPackages.id, packageId)).limit(1),
+      db.select().from(services).where(eq(services.isActive, true)),
+    ]);
+
+    const packageServiceIds = pkgRows[0]?.activeServiceIds || [];
+
+    return {
+      agencies: clientAgencies,
+      packageServiceIds,
+      allServices: allActiveServices,
+    };
+  } catch (err: any) {
+    console.error("Error fetching camp package & agencies:", err);
+    return { agencies: [], packageServiceIds: [], allServices: [] };
+  }
+}
+
+// 3. On-Site Walk-In Registration + Immediate Check-In & Station Assignment
+export async function registerWalkInEmployeeAndCheckIn(input: {
+  campId: string;
+  fullName: string;
+  empCode?: string;
+  age: number;
+  gender: string;
+  department?: string;
+  designation?: string;
+  phone?: string;
+  agencyId?: string;
+  heightCm: string;
+  weightKg: string;
+  assignedServiceIds: string[];
+  specialContainerRequired?: boolean;
+  specialContainerName?: string;
+}) {
+  try {
+    const campRows = await db
+      .select({ clientId: camps.clientId })
+      .from(camps)
+      .where(eq(camps.id, input.campId))
+      .limit(1);
+
+    if (campRows.length === 0) {
+      return { success: false, error: "Selected camp not found." };
+    }
+
+    const clientId = campRows[0].clientId;
+
+    // 1. Generate atomic sequential UHID
+    const seqResult: any = await db.execute(sql`SELECT generate_next_uhid() as uhid;`);
+    const nextUhid = seqResult.rows?.[0]?.uhid || seqResult[0]?.uhid;
+    if (!nextUhid) {
+      throw new Error("Could not generate sequential UHID.");
+    }
+
+    // 2. Calculate BMI
+    const h = parseFloat(input.heightCm) / 100;
+    const w = parseFloat(input.weightKg);
+    const bmi = h > 0 && w > 0 ? (w / (h * h)).toFixed(1) : "22.0";
+
+    const empId = `emp_${nanoid(10)}`;
+    const finalEmpCode =
+      input.empCode?.trim().toUpperCase() || `WALKIN-${nanoid(5).toUpperCase()}`;
+
+    // 3. Insert Walk-In Employee as CHECKED_IN
+    await db.insert(employees).values({
+      id: empId,
+      uhid: nextUhid,
+      clientId,
+      agencyId: input.agencyId || null,
+      campId: input.campId,
+      empCode: finalEmpCode,
+      fullName: input.fullName.trim(),
+      gender: input.gender,
+      age: Number(input.age) || 30,
+      department: input.department?.trim() || "General",
+      designation: input.designation?.trim() || "Worker",
+      phone: input.phone?.trim() || null,
+      barcode: nextUhid,
+      heightCm: input.heightCm,
+      weightKg: input.weightKg,
+      bmi,
+      assignedServiceIds: input.assignedServiceIds,
+      specialContainerRequired: Boolean(input.specialContainerRequired),
+      specialContainerName: input.specialContainerRequired
+        ? input.specialContainerName?.trim() || "Heavy Metal Detection Tube"
+        : null,
+      checkInStatus: "CHECKED_IN",
+      checkedInAt: new Date(),
+    });
+
+    // 4. Build Station Checklist strictly from assignedServiceIds
+    if (input.assignedServiceIds.length > 0) {
+      const selectedServices = await db
+        .select({ station: services.station })
+        .from(services)
+        .where(inArray(services.id, input.assignedServiceIds));
+
+      const uniqueStations = Array.from(new Set(selectedServices.map((s) => s.station)));
+
+      if (uniqueStations.length > 0) {
+        await db.insert(stationChecklist).values(
+          uniqueStations.map((station) => ({
+            id: `chk_${nanoid(10)}`,
+            employeeId: empId,
+            campId: input.campId,
+            station,
+            status: "PENDING",
+            arrivalStatus: "PENDING" as const,
+            isLocked: false,
+          }))
+        );
+      }
+    }
+
+    revalidatePath("/reception");
+    revalidatePath("/admin");
+    return { success: true, employeeId: empId, uhid: nextUhid, bmi, empCode: finalEmpCode };
+  } catch (error: any) {
+    console.error("Walk-in registration error:", error);
+    const msg = error.cause?.message || error.detail || error.message || "Walk-in failed";
+    return { success: false, error: msg };
+  }
+}
+
+// 4. Perform Camp Check-In: Atomic UHID & Strict Contracted-Stations Checklist
 export async function checkInEmployee(
   employeeId: string,
   campId: string,
   photoDataUrl?: string
 ) {
   try {
-    // 1. Generate atomic sequential UHID
     const seqResult: any = await db.execute(sql`SELECT generate_next_uhid() as uhid;`);
     const nextUhid = seqResult.rows?.[0]?.uhid || seqResult[0]?.uhid;
 
@@ -60,7 +212,6 @@ export async function checkInEmployee(
       throw new Error("Could not generate sequential UHID.");
     }
 
-    // 2. Update employee with permanent sequential UHID
     await db
       .update(employees)
       .set({
@@ -72,7 +223,6 @@ export async function checkInEmployee(
       })
       .where(eq(employees.id, employeeId));
 
-    // 3. Fetch camp package to strictly check contracted stations
     const campRecords = await db
       .select({ packageId: camps.packageId })
       .from(camps)
@@ -87,7 +237,7 @@ export async function checkInEmployee(
         .limit(1);
 
       if (pkgRecords.length > 0 && Array.isArray(pkgRecords[0].activeServiceIds)) {
-        const serviceToStationMap: Record<string, typeof stationTypeEnum.enumValues[number]> = {
+        const serviceToStationMap: Record<string, (typeof stationTypeEnum.enumValues)[number]> = {
           srv_vitals: "VITALS_ANTHROPOMETRY",
           srv_vision: "VISION_SCREENING",
           srv_audiometry: "AUDIOMETRY",
@@ -99,7 +249,6 @@ export async function checkInEmployee(
           srv_doctor_exam: "DOCTOR_EXAMINATION",
         };
 
-        // ONLY build checklist items for stations explicitly contracted in this package
         const checklistItems = pkgRecords[0].activeServiceIds
           .map((id) => serviceToStationMap[id])
           .filter(Boolean)

@@ -4,22 +4,23 @@
 import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { 
-  LayoutDashboard, 
-  Building2, 
-  FileEdit, 
-  ClipboardList, 
+import {
+  LayoutDashboard,
+  Building2,
+  FileEdit,
+  ClipboardList,
   HeartPulse,
-  Droplet, 
-  Stethoscope, 
-  Microscope, 
-  FileText, 
-  Heart, 
-  Activity, 
-  Headphones, 
-  CheckSquare, 
-  TrendingUp, 
-  LogOut 
+  Droplet,
+  Stethoscope,
+  Microscope,
+  FileText,
+  Heart,
+  Activity,
+  Headphones,
+  CheckSquare,
+  TrendingUp,
+  ShieldAlert,
+  LogOut,
 } from "lucide-react";
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
@@ -30,16 +31,17 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     { title: "Client Manager", href: "/clients", icon: Building2 },
     { title: "Pre-Registration", href: "/camps", icon: FileEdit },
     { title: "Reception Desk", href: "/reception", icon: ClipboardList },
-    { title: "Nurse Station", href: "/nurse", icon: HeartPulse, color: "text-pink-400" }, // Added from upper bar
+    { title: "Nurse Station", href: "/nurse", icon: HeartPulse, color: "text-pink-400" },
     { title: "Phlebotomy Queue", href: "/phlebotomy", icon: Droplet, color: "text-red-400" },
     { title: "Doctor Queue", href: "/doctor/field", icon: Stethoscope, color: "text-emerald-400" },
-    { title: "Laboratory Queue", href: "/diagnostics?station=PATHOLOGY_LAB", icon: Microscope, color: "text-blue-400" },
+    { title: "Laboratory Queue", href: "/lab", icon: Microscope, color: "text-blue-400" },
     { title: "X-Ray Desk", href: "/diagnostics?station=CHEST_XRAY", icon: FileText, color: "text-cyan-400" },
     { title: "ECG Desk", href: "/diagnostics?station=ECG", icon: Heart, color: "text-rose-400" },
     { title: "PFT Desk", href: "/diagnostics?station=SPIROMETRY_PFT", icon: Activity, color: "text-red-400" },
     { title: "Audiometry Desk", href: "/diagnostics?station=AUDIOMETRY", icon: Headphones, color: "text-indigo-400" },
     { title: "Review & Sign-Off", href: "/doctor/office", icon: CheckSquare, color: "text-slate-300" },
     { title: "Client Reports (MRD)", href: "/mrd", icon: TrendingUp, color: "text-rose-400" },
+    { title: "Camp Coordinator", href: "/coordinator", icon: ShieldAlert, color: "text-amber-400" },
   ];
 
   return (
@@ -51,7 +53,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           <div className="px-2 pt-1 pb-1 shrink-0">
             <h1 className="text-xl font-black tracking-tight text-white leading-none">Vyora</h1>
             <p className="text-[9px] font-bold text-teal-400 tracking-wider mt-0.5 uppercase">CAMP SYSTEM</p>
-            
+
             <div className="mt-2">
               <span className="inline-block px-2 py-0.5 rounded text-[9px] font-bold bg-[#005f5f] text-teal-200 uppercase tracking-wider">
                 ROLE: SUPER_ADMIN
@@ -63,7 +65,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           <nav className="space-y-0.5 overflow-y-auto flex-1 pr-1">
             {routineItems.map((item) => {
               const Icon = item.icon;
-              const isActive = pathname === item.href || (item.href.includes("?") && pathname === item.href.split("?")[0]);
+              const isActive =
+                pathname === item.href ||
+                (item.href.includes("?") && pathname === item.href.split("?")[0]);
               return (
                 <Link
                   key={item.title}

@@ -3,7 +3,7 @@
 
 import React, { useState, useEffect } from "react";
 import { getMasterServices, createClientWithPackage } from "@/actions/client-actions";
-import { Building2, Plus, Check, ShieldCheck, Stethoscope } from "lucide-react";
+import { Building2, Plus, Check, ShieldCheck, Stethoscope, RefreshCw } from "lucide-react";
 import { BackButton } from "@/components/shared/BackButton";
 
 interface ServiceItem {
@@ -13,14 +13,60 @@ interface ServiceItem {
   station: string;
 }
 
+const STRENGTH_OPTIONS = [
+  "1-100",
+  "101-250",
+  "251-500",
+  "501-1000",
+  "1001-1500",
+  "1501-2000",
+  "2001-3000",
+  "3000-5000",
+  "5000+",
+];
+
+const CAMP_MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+function generateUniquePrefix(name: string) {
+  const clean = name
+    .trim()
+    .replace(/[^a-zA-Z0-9\s]/g, "")
+    .split(/\s+/)
+    .filter(Boolean);
+  const prefix =
+    clean.length >= 2
+      ? `${clean[0].slice(0, 4)}-${clean[1].slice(0, 3)}`
+      : (clean[0] || "CLI").slice(0, 6);
+  const rand = Math.floor(100 + Math.random() * 900);
+  return `${prefix.toUpperCase()}-${rand}`;
+}
+
 export default function ClientsPage() {
   const [servicesList, setServicesList] = useState<ServiceItem[]>([]);
   const [selectedServices, setSelectedServices] = useState<string[]>(["srv_vitals", "srv_doc_exam"]);
   const [clientName, setClientName] = useState("");
   const [clientCode, setClientCode] = useState("");
+  const [codeManuallyEdited, setCodeManuallyEdited] = useState(false);
   const [contactPerson, setContactPerson] = useState("");
+  const [contactDesignation, setContactDesignation] = useState("");
+  const [contactDepartment, setContactDepartment] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
+  const [totalStrength, setTotalStrength] = useState("101-250");
+  const [campMonth, setCampMonth] = useState(CAMP_MONTHS[new Date().getMonth()]);
   const [agenciesInput, setAgenciesInput] = useState("Direct Payroll, Apex Labor Services");
   const [packageName, setPackageName] = useState("Standard Health Checkup Package");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -34,6 +80,13 @@ export default function ClientsPage() {
     load();
   }, []);
 
+  const handleClientNameChange = (val: string) => {
+    setClientName(val);
+    if (!codeManuallyEdited && val.trim().length >= 2) {
+      setClientCode(generateUniquePrefix(val));
+    }
+  };
+
   const toggleService = (id: string) => {
     setSelectedServices((prev) =>
       prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]
@@ -42,8 +95,8 @@ export default function ClientsPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!clientName || !clientCode) {
-      alert("Please provide client name and code");
+    if (!clientName) {
+      alert("Please provide client name");
       return;
     }
 
@@ -60,8 +113,12 @@ export default function ClientsPage() {
         name: clientName,
         code: clientCode,
         contactPerson,
+        contactDesignation,
+        contactDepartment,
         email,
         phone,
+        totalStrength,
+        campMonth,
         agenciesList: agencyArray,
         packageName,
         selectedServiceIds: selectedServices,
@@ -73,10 +130,15 @@ export default function ClientsPage() {
         return;
       }
 
-      setSuccessMessage(`Client "${clientName}" onboarded with ${selectedServices.length} active services!`);
+      setSuccessMessage(
+        `Client "${clientName}" (${res.clientCode}) onboarded with ${selectedServices.length} active services!`
+      );
       setClientName("");
       setClientCode("");
+      setCodeManuallyEdited(false);
       setContactPerson("");
+      setContactDesignation("");
+      setContactDepartment("");
       setEmail("");
       setPhone("");
     } catch (err: any) {
@@ -89,8 +151,6 @@ export default function ClientsPage() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-6 md:p-10">
       <div className="max-w-5xl mx-auto space-y-6">
-        
-        {/* Back and Home Shortcut */}
         <BackButton fallbackHref="/admin" label="Back to Dashboard" />
 
         {/* Header */}
@@ -123,6 +183,7 @@ export default function ClientsPage() {
               <ShieldCheck className="w-5 h-5 text-indigo-500" />
               <span>1. Client Information</span>
             </h2>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">Client / Company Name *</label>
@@ -130,32 +191,76 @@ export default function ClientsPage() {
                   type="text"
                   placeholder="e.g. Tata Motors Plant"
                   value={clientName}
-                  onChange={(e) => setClientName(e.target.value)}
+                  onChange={(e) => handleClientNameChange(e.target.value)}
                   required
                   className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
               </div>
+
               <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">Client Code * (Short Prefix)</label>
-                <input
-                  type="text"
-                  placeholder="e.g. TATA-MTR"
-                  value={clientCode}
-                  onChange={(e) => setClientCode(e.target.value)}
-                  required
-                  className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 uppercase"
-                />
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  Client Code * (Auto-Generated Unique)
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="Auto-generated unique code"
+                    value={clientCode}
+                    onChange={(e) => {
+                      setClientCode(e.target.value);
+                      setCodeManuallyEdited(true);
+                    }}
+                    required
+                    className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500 uppercase"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCodeManuallyEdited(false);
+                      setClientCode(generateUniquePrefix(clientName || "CLIENT"));
+                    }}
+                    title="Regenerate unique code"
+                    className="px-2.5 py-2 border border-slate-300 rounded-md hover:bg-slate-50 text-slate-600"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
+
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">Contact Person</label>
                 <input
                   type="text"
-                  placeholder="e.g. Amit Shah (HR Head)"
+                  placeholder="e.g. Amit Shah"
                   value={contactPerson}
                   onChange={(e) => setContactPerson(e.target.value)}
                   className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
               </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Designation</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. HR Head"
+                    value={contactDesignation}
+                    onChange={(e) => setContactDesignation(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Department</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. EHS / HR"
+                    value={contactDepartment}
+                    onChange={(e) => setContactDepartment(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">Email / Phone</label>
                 <div className="grid grid-cols-2 gap-2">
@@ -173,6 +278,37 @@ export default function ClientsPage() {
                     onChange={(e) => setPhone(e.target.value)}
                     className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Total Employee Strength</label>
+                  <select
+                    value={totalStrength}
+                    onChange={(e) => setTotalStrength(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    {STRENGTH_OPTIONS.map((opt) => (
+                      <option key={opt} value={opt}>
+                        {opt}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Month of Camp</label>
+                  <select
+                    value={campMonth}
+                    onChange={(e) => setCampMonth(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    {CAMP_MONTHS.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
             </div>

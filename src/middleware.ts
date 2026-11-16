@@ -7,32 +7,45 @@ const JWT_SECRET = new TextEncoder().encode(
   process.env.JWT_SECRET || "ohc-super-secure-production-jwt-secret-key-32chars"
 );
 
-// Inside src/middleware.ts
-
 const ROLE_PERMISSIONS: Record<string, string[]> = {
   SUPER_ADMIN: [
-    "/", 
-    "/clients", 
-    "/camps", 
-    "/reception", 
-    "/nurse", 
-    "/phlebotomy", 
-    "/diagnostics", 
-    "/doctor", 
-    "/mrd", 
-    "/admin"
+    "/",
+    "/clients",
+    "/camps",
+    "/reception",
+    "/nurse",
+    "/phlebotomy",
+    "/lab",
+    "/diagnostics",
+    "/doctor",
+    "/mrd",
+    "/coordinator",
+    "/admin",
+  ],
+  CAMP_COORDINATOR: [
+    "/",
+    "/coordinator",
+    "/camps",
+    "/reception",
+    "/nurse",
+    "/phlebotomy",
+    "/lab",
+    "/diagnostics",
+    "/doctor",
+    "/mrd",
   ],
   FIELD_DOCTOR: ["/", "/doctor/field", "/diagnostics"],
-  OFFICE_DOCTOR: ["/", "/doctor/office", "/diagnostics", "/mrd"],
+  OFFICE_DOCTOR: ["/", "/doctor/office", "/diagnostics", "/lab", "/mrd"],
   DOCTOR_EXAMINER: ["/", "/doctor", "/diagnostics"],
   NURSE: ["/", "/nurse"],
   RECEPTIONIST: ["/", "/reception", "/camps"],
   PHLEBOTOMIST: ["/", "/phlebotomy"],
-  LAB_TECHNICIAN: ["/", "/phlebotomy", "/diagnostics"],
+  LAB_TECHNICIAN: ["/", "/lab", "/phlebotomy"],
   DIAGNOSTIC_TECHNICIAN: ["/", "/diagnostics"],
   MRD_OFFICER: ["/", "/mrd"],
   CLIENT_HR: ["/", "/mrd"],
 };
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -68,7 +81,7 @@ export async function middleware(request: NextRequest) {
     }
 
     return NextResponse.next();
-  } catch (err) {
+  } catch {
     const response = NextResponse.redirect(new URL("/login", request.url));
     response.cookies.delete("ohc_session");
     return response;
