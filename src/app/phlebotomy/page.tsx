@@ -6,6 +6,7 @@ import { getCampsList } from "@/actions/camp-actions";
 import {
   getStationEmployeesWithStatus,
   toggleEmployeeArrivalAtStation,
+  checkBarcodeAvailability,
   submitPhlebotomyCollection,
   lookupAndVerifySampleByBarcode,
   submitPhlebotomyHandover,
@@ -14,6 +15,7 @@ import {
 } from "@/actions/clinical-actions";
 import * as XLSX from "xlsx";
 import { BrowserMultiFormatReader, IScannerControls } from "@zxing/browser";
+import { BarcodeFormat, DecodeHintType } from "@zxing/library";
 import {
   Barcode,
   Camera,
@@ -24,13 +26,13 @@ import {
   CheckCircle2,
   Smartphone,
   Zap,
-  Info,
   X,
   Lock,
   Truck,
   FlaskConical,
 } from "lucide-react";
 import { BackButton } from "@/components/shared/BackButton";
+import { StationAttendanceBar } from "@/components/shared/StationAttendanceBar";
 
 type PhleboMode = "COLLECTION" | "VERIFY_URINE" | "HANDOVER";
 
@@ -43,7 +45,6 @@ export default function PhlebotomyStationPage() {
   const [mode, setMode] = useState<PhleboMode>("COLLECTION");
   const [queueTab, setQueueTab] = useState<"pending" | "completed">("pending");
 
-  // Barcode & Sample State
   const [barcodeInput, setBarcodeInput] = useState("");
   const [bloodCollected, setBloodCollected] = useState(false);
   const [urineCollected, setUrineCollected] = useState(false);
@@ -53,14 +54,14 @@ export default function PhlebotomyStationPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
 
-  // Deferred Urine / Handover Scan State
   const [quickScanInput, setQuickScanInput] = useState("");
   const [verifiedUrineEmp, setVerifiedUrineEmp] = useState<any | null>(null);
   const [phleboName, setPhleboName] = useState("");
   const [riderName, setRiderName] = useState("");
+  const [phleboAck, setPhleboAck] = useState(false);
+  const [riderAck, setRiderAck] = useState(false);
   const [handoverScannedEmps, setHandoverScannedEmps] = useState<any[]>([]);
 
-  // Live Camera Scanner State
   const [isLiveScanning, setIsLiveScanning] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [hasTorch, setHasTorch] = useState(false);
@@ -137,6 +138,17 @@ export default function PhlebotomyStationPage() {
     }
   };
 
+  // Instant Duplicate Barcode Check (runs immediately on scan or change)
+  const validateBarcodeInstant = async (code: string) => {
+    if (!selectedEmp || !code.trim()) return;
+    const check = await checkBarcodeAvailability({ barcode: code, employeeId: selectedEmp.id });
+    if (!check.available) {
+      setErrorBanner(check.error || "Duplicate barcode!");
+    } else {
+      setErrorBanner("");
+    }
+  };
+
   const handleBarcodeDetected = async (rawText: string) => {
     const cleanCode = rawText.trim().toUpperCase();
     playScannerBeep();
@@ -146,6 +158,7 @@ export default function PhlebotomyStationPage() {
     if (mode === "COLLECTION") {
       setBarcodeInput(cleanCode);
       setSuccessBanner(`✓ Scanned & Auto-Filled Barcode: ${cleanCode}`);
+      await validateBarcodeInstant(cleanCode);
     } else if (mode === "VERIFY_URINE") {
       setQuickScanInput(cleanCode);
       await handleVerifyUrineLookup(cleanCode, true);
@@ -155,6 +168,7 @@ export default function PhlebotomyStationPage() {
     }
   };
 
+  // Ultra-Fast Camera Loop: Native Hardware BarcodeDetector first (~20ms), ZXing targeted fallback
   useEffect(() => {
     if (!isLiveScanning) {
       if (scannerControlsRef.current) {
@@ -165,9 +179,7 @@ export default function PhlebotomyStationPage() {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
+      if (videoRef.current) videoRef.current.srcObject = null;
       setTorchOn(false);
       setHasTorch(false);
       setCameraLoading(false);
@@ -175,9 +187,10 @@ export default function PhlebotomyStationPage() {
     }
 
     let isSubscribed = true;
+    let rafId: number | null = null;
     setCameraLoading(true);
 
-    async function initLiveCamera() {
+    async function initFastCamera() {
       try {
         const isSecure =
           typeof window !== "undefined" &&
@@ -186,7 +199,7 @@ export default function PhlebotomyStationPage() {
             window.location.hostname === "127.0.0.1");
 
         if (!isSecure && window.location.protocol === "http:" && window.location.hostname !== "localhost") {
-          throw new Error("Camera stream requires HTTPS. Run with: npx next dev --experimental-https -H 0.0.0.0");
+          throw new Error("Camera stream requires HTTPS.");
         }
 
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -194,6 +207,8 @@ export default function PhlebotomyStationPage() {
             facingMode: { ideal: "environment" },
             width: { ideal: 1280 },
             height: { ideal: 720 },
+            // @ts-expect-error continuous autofocus hint for mobile rear cameras
+            focusMode: "continuous",
           },
           audio: false,
         });
@@ -204,7 +219,6 @@ export default function PhlebotomyStationPage() {
         }
 
         streamRef.current = stream;
-
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
@@ -215,27 +229,57 @@ export default function PhlebotomyStationPage() {
           if (caps?.torch) setHasTorch(true);
         }
 
-        const codeReader = new BrowserMultiFormatReader();
+        // Fast Path: Native Hardware BarcodeDetector
+        if (typeof window !== "undefined" && "BarcodeDetector" in window) {
+          const detector = new (window as any).BarcodeDetector({
+            formats: ["code_128", "code_39", "ean_13", "ean_8", "qr_code", "codabar"],
+          });
+          const scanLoop = async () => {
+            if (!isSubscribed || !videoRef.current) return;
+            try {
+              if (videoRef.current.readyState >= 2) {
+                const results = await detector.detect(videoRef.current);
+                if (results && results.length > 0 && isSubscribed) {
+                  await handleBarcodeDetected(results[0].rawValue);
+                  return;
+                }
+              }
+            } catch {}
+            rafId = requestAnimationFrame(scanLoop);
+          };
+          rafId = requestAnimationFrame(scanLoop);
+          return;
+        }
+
+        // Fallback: Targeted ZXing (only common lab formats)
+        const hints = new Map();
+        hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+          BarcodeFormat.CODE_128,
+          BarcodeFormat.CODE_39,
+          BarcodeFormat.EAN_13,
+          BarcodeFormat.QR_CODE,
+        ]);
+        const codeReader = new BrowserMultiFormatReader(hints, { delayBetweenScanAttempts: 100 });
         const controls = await codeReader.decodeFromVideoElement(videoRef.current!, (result) => {
           if (result && isSubscribed) {
             handleBarcodeDetected(result.getText());
           }
         });
-
         scannerControlsRef.current = controls;
       } catch (err: any) {
         if (isSubscribed) {
-          setErrorBanner("Camera error: " + (err?.message || "Please check camera permissions in browser."));
+          setErrorBanner("Camera error: " + (err?.message || "Check camera permissions."));
           setIsLiveScanning(false);
           setCameraLoading(false);
         }
       }
     }
 
-    const timer = setTimeout(initLiveCamera, 100);
+    const timer = setTimeout(initFastCamera, 80);
     return () => {
       isSubscribed = false;
       clearTimeout(timer);
+      if (rafId !== null) cancelAnimationFrame(rafId);
       if (scannerControlsRef.current) {
         scannerControlsRef.current.stop();
         scannerControlsRef.current = null;
@@ -258,42 +302,29 @@ export default function PhlebotomyStationPage() {
     }
   };
 
-  const triggerPhotoSnapshot = () => {
-    setErrorBanner("");
-    photoInputRef.current?.click();
-  };
-
   const handlePhotoCaptured = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     try {
       if (typeof window !== "undefined" && "BarcodeDetector" in window) {
-        try {
-          const detector = new (window as any).BarcodeDetector({
-            formats: ["code_128", "code_39", "ean_13", "ean_8", "qr_code", "upc_a", "itf", "codabar"],
-          });
-          const bitmap = await createImageBitmap(file);
-          const detected = await detector.detect(bitmap);
-          if (detected && detected.length > 0) {
-            await handleBarcodeDetected(detected[0].rawValue);
-            e.target.value = "";
-            return;
-          }
-        } catch {}
+        const detector = new (window as any).BarcodeDetector({
+          formats: ["code_128", "code_39", "ean_13", "ean_8", "qr_code", "codabar"],
+        });
+        const bitmap = await createImageBitmap(file);
+        const detected = await detector.detect(bitmap);
+        if (detected?.length > 0) {
+          await handleBarcodeDetected(detected[0].rawValue);
+          e.target.value = "";
+          return;
+        }
       }
-
       const reader = new FileReader();
       reader.onload = async () => {
-        const dataUrl = reader.result as string;
         try {
           const codeReader = new BrowserMultiFormatReader();
-          const result = await codeReader.decodeFromImageUrl(dataUrl);
-          if (result) {
-            await handleBarcodeDetected(result.getText());
-          } else {
-            setErrorBanner("Could not detect barcode from photo. Hold closer or type manually.");
-          }
+          const result = await codeReader.decodeFromImageUrl(reader.result as string);
+          if (result) await handleBarcodeDetected(result.getText());
+          else setErrorBanner("Could not detect barcode from photo.");
         } catch {
           setErrorBanner("Could not read barcode. Ensure good lighting or type manually.");
         } finally {
@@ -310,8 +341,12 @@ export default function PhlebotomyStationPage() {
   const handleSubmitCollection = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedEmp) return;
+    if (selectedEmp.arrivalStatus === "PENDING") {
+      setErrorBanner("Mandatory Rule: Please click 'Mark As Arrived' first before saving sample collection.");
+      return;
+    }
     if (!barcodeInput.trim()) {
-      setErrorBanner("Please scan or manually enter the pre-applied lab kit barcode.");
+      setErrorBanner("Please scan or enter the pre-applied lab kit barcode.");
       return;
     }
 
@@ -326,15 +361,10 @@ export default function PhlebotomyStationPage() {
       urineCollected,
       specialContainerCollected: specialCollected,
     });
-
     setIsSubmitting(false);
 
     if (res.success) {
-      setSuccessBanner(
-        `Barcode ${barcodeInput} locked to ${selectedEmp.fullName}. ${
-          res.fullySecured ? "All samples secured!" : "Saved (remains in waiting list until remaining container is collected)."
-        }`
-      );
+      setSuccessBanner(`Barcode ${barcodeInput} locked to ${selectedEmp.fullName}.`);
       setSelectedEmp(null);
       setBarcodeInput("");
       loadList();
@@ -345,7 +375,7 @@ export default function PhlebotomyStationPage() {
 
   const handleRequestBarcodeUnlock = async () => {
     if (!selectedEmp) return;
-    const reason = prompt(`Why does ${selectedEmp.fullName}'s locked barcode (${selectedEmp.labKitBarcode}) need to be changed?`);
+    const reason = prompt(`Why does ${selectedEmp.fullName}'s locked barcode (${selectedEmp.labKitBarcode}) need change?`);
     if (!reason?.trim()) return;
     const res = await requestCorrectionUnlock({
       campId: selectedCampId,
@@ -353,11 +383,7 @@ export default function PhlebotomyStationPage() {
       station: "PHLEBOTOMY",
       reason,
     });
-    if (res.success) {
-      setSuccessBanner("Barcode unlock request sent to Camp Coordinator Desk.");
-    } else {
-      setErrorBanner(res.error || "Could not send request.");
-    }
+    if (res.success) setSuccessBanner("Barcode unlock request sent to Camp Coordinator Desk.");
   };
 
   const handleVerifyUrineLookup = async (code: string, markUrine: boolean) => {
@@ -377,7 +403,7 @@ export default function PhlebotomyStationPage() {
       );
       loadList();
     } else {
-      setErrorBanner(res.error || "Barcode not found.");
+      setErrorBanner(res.error || "Barcode not found in this camp.");
     }
   };
 
@@ -395,41 +421,54 @@ export default function PhlebotomyStationPage() {
         return [res.employee, ...prev];
       });
       setQuickScanInput("");
-      setSuccessBanner(`✓ Added ${res.employee.fullName} (${code}) to Handover Batch.`);
+      if (res.employee.handoverVerified) {
+        setErrorBanner(
+          `⚠️ BATCH DUPLICATION FLAG: ${res.employee.fullName} (${code}) was already handed over in Batch #${res.employee.handoverBatchNumber} (Rider: ${res.employee.handoverRiderName}).`
+        );
+      } else {
+        setSuccessBanner(`✓ Added ${res.employee.fullName} (${code}) to Handover Batch.`);
+      }
     } else {
-      setErrorBanner(res.error || "Barcode not found.");
+      setErrorBanner(res.error || "Barcode not found in this camp.");
     }
   };
 
   const handleConfirmHandover = async () => {
     if (!phleboName.trim() || !riderName.trim()) {
-      setErrorBanner("Enter both Phlebotomist Name and Rider Name before confirming handover.");
+      setErrorBanner("Enter both Phlebotomist Name and Rider Name.");
+      return;
+    }
+    if (!phleboAck || !riderAck) {
+      setErrorBanner("Both Phlebotomist and Rider acknowledgment checkboxes are required.");
       return;
     }
     const res = await submitPhlebotomyHandover({
       campId: selectedCampId,
       phleboName,
       riderName,
+      phleboAcknowledged: phleboAck,
+      riderAcknowledged: riderAck,
       handoverType: "CAMP_TO_RIDER",
       verifiedEmployeeIds: handoverScannedEmps.map((e) => e.id),
     });
     if (res.success) {
-      setSuccessBanner(`Handover confirmed for ${handoverScannedEmps.length} sample(s) with Rider ${riderName}!`);
+      setSuccessBanner(`Handover Batch #${res.batchNumber} confirmed for ${handoverScannedEmps.length} sample(s) with Rider ${riderName}!`);
       setHandoverScannedEmps([]);
+      setPhleboAck(false);
+      setRiderAck(false);
       loadList();
     } else {
       setErrorBanner(res.error || "Handover failed.");
     }
   };
 
-  const handleExportPhlebotomyExcel = async () => {
+  const handleExportExcel = async (carriedOnly: boolean) => {
     if (!selectedCampId) return;
     setIsExporting(true);
-
     try {
-      const data = await getPhlebotomyExportRoster(selectedCampId);
+      const data = await getPhlebotomyExportRoster(selectedCampId, carriedOnly);
       if (!data || data.employees.length === 0) {
-        alert("No employee records found to export for this camp.");
+        alert(carriedOnly ? "No carried/collected samples found to export yet." : "No employee records found.");
         setIsExporting(false);
         return;
       }
@@ -448,19 +487,23 @@ export default function PhlebotomyStationPage() {
         Blood: row.bloodStatus,
         Urine: row.urineStatus,
         "Special Tube": row.specialTubeStatus,
-        "Collection Timestamp": row.collectedTimestamp,
+        "Collection Timestamp (DDMMYYYY, HHMMSS)": row.collectedTimestamp,
         "Handover Status": row.handoverStatus,
         "Phlebo Name": row.phleboName,
         "Rider Name": row.riderName,
-        "Handover Timestamp": row.handoverTimestamp,
+        "Handover Timestamp (DDMMYYYY, HHMMSS)": row.handoverTimestamp,
       }));
 
       const ws = XLSX.utils.json_to_sheet(exportRows);
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "Phlebo Sample Manifest");
-
+      XLSX.utils.book_append_sheet(wb, ws, carriedOnly ? "Handover Carried Samples" : "Phlebo All Roster");
       const cleanCampName = data.campName.replace(/[^a-zA-Z0-9_-]/g, "_");
-      XLSX.writeFile(wb, `Phlebotomy_Collection_${cleanCampName}_Samples.xlsx`);
+      XLSX.writeFile(
+        wb,
+        carriedOnly
+          ? `Lab_Handover_Carried_Samples_${cleanCampName}.xlsx`
+          : `Phlebotomy_Full_Roster_${cleanCampName}.xlsx`
+      );
     } catch (err: any) {
       alert("Export failed: " + err.message);
     } finally {
@@ -487,43 +530,22 @@ export default function PhlebotomyStationPage() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-4 sm:p-6 space-y-5">
-      <input
-        ref={photoInputRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        className="hidden"
-        onChange={handlePhotoCaptured}
-      />
+      <input ref={photoInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handlePhotoCaptured} />
 
-      {/* FULLSCREEN LIVE SCANNER MODAL */}
       {isLiveScanning && (
         <div className="fixed inset-0 z-50 bg-black flex flex-col justify-between p-4 sm:p-6">
           <div className="flex items-center justify-between text-white z-20">
             <div className="flex items-center space-x-2">
               <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-ping" />
-              <span className="font-bold text-sm uppercase tracking-wider text-emerald-400">
-                Live Barcode Scanner
-              </span>
+              <span className="font-bold text-sm uppercase tracking-wider text-emerald-400">Ultra-Fast Barcode Scanner</span>
             </div>
-
             <div className="flex items-center space-x-2">
               {hasTorch && (
-                <button
-                  type="button"
-                  onClick={toggleTorch}
-                  className={`p-2.5 rounded-full border transition ${
-                    torchOn ? "bg-amber-400 text-amber-950 border-amber-300" : "bg-white/10 text-white border-white/20"
-                  }`}
-                >
+                <button type="button" onClick={toggleTorch} className={`p-2.5 rounded-full border ${torchOn ? "bg-amber-400 text-amber-950" : "bg-white/10 text-white"}`}>
                   <Zap className="w-5 h-5" />
                 </button>
               )}
-              <button
-                type="button"
-                onClick={() => setIsLiveScanning(false)}
-                className="p-2.5 rounded-full bg-white/10 text-white border border-white/20 hover:bg-white/20 transition"
-              >
+              <button type="button" onClick={() => setIsLiveScanning(false)} className="p-2.5 rounded-full bg-white/10 text-white border border-white/20">
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -550,17 +572,13 @@ export default function PhlebotomyStationPage() {
             </div>
           </div>
 
-          <div className="text-center text-white/80 text-xs space-y-1 pb-2 z-20">
-            <p className="font-bold text-sm text-white">Point camera at vial or zip-bag barcode</p>
-            <p className="text-[11px] text-emerald-300">Auto-detects instantly & updates record</p>
-          </div>
+          <div className="text-center text-white/80 text-xs pb-2">Point camera at vial or zip-bag barcode</div>
         </div>
       )}
 
       <div className="max-w-6xl mx-auto space-y-5">
         <BackButton fallbackHref="/admin" label="Back to Dashboard" />
 
-        {/* Top Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-3">
           <div>
             <div className="flex items-center space-x-2 text-rose-600 font-bold text-xs uppercase tracking-wider">
@@ -573,73 +591,44 @@ export default function PhlebotomyStationPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <StationAttendanceBar campId={selectedCampId} stationName="PHLEBOTOMY" />
             <select
               value={selectedCampId}
               onChange={(e) => setSelectedCampId(e.target.value)}
               className="px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-[#002642]"
             >
               {camps.map((c) => (
-                <option key={c.id} value={c.id}>
-                  [{c.clientName}] {c.name}
-                </option>
+                <option key={c.id} value={c.id}>[{c.clientName}] {c.name}</option>
               ))}
             </select>
 
             <button
-              onClick={handleExportPhlebotomyExcel}
+              onClick={() => handleExportExcel(false)}
               disabled={isExporting}
-              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs transition flex items-center space-x-1.5 disabled:opacity-50"
+              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center space-x-1.5"
             >
               <FileSpreadsheet className="w-3.5 h-3.5" />
-              <span>{isExporting ? "Exporting..." : "Download Phlebo & Handover Excel"}</span>
+              <span>All Roster Excel</span>
             </button>
           </div>
         </div>
 
-        {/* Mode Switcher */}
         <div className="flex flex-wrap gap-2 bg-slate-200/70 p-1 rounded-xl w-fit text-xs font-bold">
-          <button
-            onClick={() => {
-              setMode("COLLECTION");
-              setErrorBanner("");
-              setSuccessBanner("");
-            }}
-            className={`px-4 py-1.5 rounded-lg transition ${
-              mode === "COLLECTION" ? "bg-white text-[#002642] shadow-xs" : "text-slate-600"
-            }`}
-          >
+          <button onClick={() => { setMode("COLLECTION"); setErrorBanner(""); setSuccessBanner(""); }} className={`px-4 py-1.5 rounded-lg ${mode === "COLLECTION" ? "bg-white text-[#002642] shadow-xs" : "text-slate-600"}`}>
             1. Sample Collection
           </button>
-          <button
-            onClick={() => {
-              setMode("VERIFY_URINE");
-              setErrorBanner("");
-              setSuccessBanner("");
-            }}
-            className={`px-4 py-1.5 rounded-lg transition flex items-center space-x-1 ${
-              mode === "VERIFY_URINE" ? "bg-white text-amber-700 shadow-xs" : "text-slate-600"
-            }`}
-          >
+          <button onClick={() => { setMode("VERIFY_URINE"); setErrorBanner(""); setSuccessBanner(""); }} className={`px-4 py-1.5 rounded-lg flex items-center space-x-1 ${mode === "VERIFY_URINE" ? "bg-white text-amber-700 shadow-xs" : "text-slate-600"}`}>
             <FlaskConical className="w-3.5 h-3.5" />
             <span>2. Scan-to-Verify Urine</span>
           </button>
-          <button
-            onClick={() => {
-              setMode("HANDOVER");
-              setErrorBanner("");
-              setSuccessBanner("");
-            }}
-            className={`px-4 py-1.5 rounded-lg transition flex items-center space-x-1 ${
-              mode === "HANDOVER" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-600"
-            }`}
-          >
+          <button onClick={() => { setMode("HANDOVER"); setErrorBanner(""); setSuccessBanner(""); }} className={`px-4 py-1.5 rounded-lg flex items-center space-x-1 ${mode === "HANDOVER" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-600"}`}>
             <Truck className="w-3.5 h-3.5" />
             <span>3. Lab Handover (Rider)</span>
           </button>
         </div>
 
         {successBanner && (
-          <div className="p-3.5 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs flex items-center space-x-2 font-bold shadow-xs">
+          <div className="p-3.5 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs flex items-center space-x-2 font-bold">
             <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
             <span>{successBanner}</span>
           </div>
@@ -652,146 +641,75 @@ export default function PhlebotomyStationPage() {
           </div>
         )}
 
-        {/* MODE 1: SAMPLE COLLECTION */}
+        {/* MODE 1: COLLECTION */}
         {mode === "COLLECTION" && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Waiting / Completed Queue */}
             <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-3">
               <div className="flex bg-slate-100 p-1 rounded-xl text-xs font-bold">
-                <button
-                  onClick={() => setQueueTab("pending")}
-                  className={`flex-1 py-1.5 rounded-lg transition ${
-                    queueTab === "pending" ? "bg-white text-[#002642] shadow-xs" : "text-slate-500"
-                  }`}
-                >
+                <button onClick={() => setQueueTab("pending")} className={`flex-1 py-1.5 rounded-lg ${queueTab === "pending" ? "bg-white text-[#002642] shadow-xs" : "text-slate-500"}`}>
                   Waiting ({pendingList.length})
                 </button>
-                <button
-                  onClick={() => setQueueTab("completed")}
-                  className={`flex-1 py-1.5 rounded-lg transition ${
-                    queueTab === "completed" ? "bg-white text-emerald-700 shadow-xs" : "text-slate-500"
-                  }`}
-                >
+                <button onClick={() => setQueueTab("completed")} className={`flex-1 py-1.5 rounded-lg ${queueTab === "completed" ? "bg-white text-emerald-700 shadow-xs" : "text-slate-500"}`}>
                   Secured ({completedList.length})
                 </button>
               </div>
 
               <div className="relative">
                 <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Search patient, code, or agency..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-8 pr-3 py-1.5 border border-slate-300 rounded-xl text-xs outline-none"
-                />
+                <input type="text" placeholder="Search patient, code, or agency..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full pl-8 pr-3 py-1.5 border border-slate-300 rounded-xl text-xs outline-none" />
               </div>
 
               <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1">
                 {filtered.map((emp) => (
-                  <div
-                    key={emp.id}
-                    onClick={() => handleSelectEmp(emp)}
-                    className={`p-3 rounded-xl border text-xs cursor-pointer transition space-y-1 ${
-                      selectedEmp?.id === emp.id
-                        ? "border-rose-500 bg-rose-50/50"
-                        : "border-slate-200 hover:border-slate-300 bg-white"
-                    }`}
-                  >
+                  <div key={emp.id} onClick={() => handleSelectEmp(emp)} className={`p-3 rounded-xl border text-xs cursor-pointer transition space-y-1 ${selectedEmp?.id === emp.id ? "border-rose-500 bg-rose-50/50" : "border-slate-200 bg-white"}`}>
                     <div className="flex items-center justify-between gap-2">
                       <div className="font-bold text-[#002642] truncate">{emp.fullName}</div>
-                      {emp.arrivalStatus === "ARRIVED" && (
-                        <span className="px-1.5 py-0.5 rounded bg-blue-600 text-white text-[9px] font-bold">
-                          Arrived
-                        </span>
-                      )}
+                      {emp.arrivalStatus === "ARRIVED" && <span className="px-1.5 py-0.5 rounded bg-blue-600 text-white text-[9px] font-bold">Arrived</span>}
                     </div>
                     <div className="text-[11px] font-mono text-teal-700">{emp.uhid}</div>
                     <div className="text-[10px] font-bold text-indigo-700 flex items-center space-x-1">
                       <Building2 className="w-3 h-3" />
                       <span>{emp.agencyName || "Direct Payroll"}</span>
                     </div>
-                    <div className="flex flex-wrap gap-1 pt-1">
-                      <span
-                        className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold ${
-                          emp.bloodCollected ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-400"
-                        }`}
-                      >
-                        Blood: {emp.bloodCollected ? "DONE" : "PENDING"}
-                      </span>
-                      <span
-                        className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold ${
-                          emp.urineCollected ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-400"
-                        }`}
-                      >
-                        Urine: {emp.urineCollected ? "DONE" : "PENDING"}
-                      </span>
-                      {emp.specialContainerRequired && (
-                        <span
-                          className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold ${
-                            emp.specialContainerCollected
-                              ? "bg-purple-100 text-purple-800"
-                              : "bg-amber-100 text-amber-800"
-                          }`}
-                        >
-                          Special: {emp.specialContainerCollected ? "DONE" : "REQ"}
-                        </span>
-                      )}
-                    </div>
                   </div>
                 ))}
               </div>
             </div>
 
-            {/* Scanner & Dual/Special Collection Panel */}
             <div className="lg:col-span-2 bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
               {selectedEmp ? (
-                <form onSubmit={handleSubmitCollection} className="space-y-6">
+                <form onSubmit={handleSubmitCollection} className="space-y-5">
                   <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
                     <div>
                       <div className="font-black text-[#002642] text-sm">{selectedEmp.fullName}</div>
-                      <div className="text-slate-500 font-mono">
-                        UHID: {selectedEmp.uhid} | Code: {selectedEmp.empCode}
-                      </div>
-                      <div className="text-indigo-700 font-bold mt-0.5">
-                        Agency: {selectedEmp.agencyName || "Direct Payroll"}
-                      </div>
+                      <div className="text-slate-500 font-mono">UHID: {selectedEmp.uhid} | Code: {selectedEmp.empCode}</div>
+                      <div className="text-indigo-700 font-bold mt-0.5">Agency: {selectedEmp.agencyName || "Direct Payroll"}</div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleToggleArrived}
-                      className={`px-3.5 py-1.5 text-white text-xs font-bold rounded-lg shadow-xs transition ${
-                        isArrived ? "bg-blue-600 hover:bg-blue-700" : "bg-[#002642] hover:bg-[#001e38]"
-                      }`}
-                    >
+                    <button type="button" onClick={handleToggleArrived} className={`px-3.5 py-1.5 text-white text-xs font-bold rounded-lg shadow-xs ${isArrived ? "bg-blue-600" : "bg-[#002642]"}`}>
                       {isArrived ? "Arrived" : "Mark As Arrived"}
                     </button>
                   </div>
 
-                  {/* Barcode Input + Lock */}
+                  {!isArrived && selectedEmp.arrivalStatus === "PENDING" && (
+                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs font-bold text-amber-900 flex items-center space-x-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>Mandatory: Click &quot;Mark As Arrived&quot; above before saving samples.</span>
+                    </div>
+                  )}
+
                   <div className="space-y-3">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                       <label className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center space-x-1.5">
                         <Barcode className="w-4 h-4 text-rose-600" />
-                        <span>Pre-Applied Kit Barcode (1 Barcode = 1 Employee) *</span>
+                        <span>Pre-Applied Kit Barcode *</span>
                       </label>
-
                       {!selectedEmp.barcodeLocked && (
                         <div className="flex items-center space-x-2">
-                          <button
-                            type="button"
-                            onClick={() => setIsLiveScanning(true)}
-                            className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 transition shadow-sm"
-                          >
+                          <button type="button" onClick={() => setIsLiveScanning(true)} className="px-3.5 py-1.5 bg-rose-600 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5">
                             <Smartphone className="w-3.5 h-3.5" />
                             <span>Open Live Scanner</span>
                           </button>
-
-                          <button
-                            type="button"
-                            onClick={triggerPhotoSnapshot}
-                            className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center space-x-1.5 transition border border-slate-300"
-                          >
+                          <button type="button" onClick={() => photoInputRef.current?.click()} className="px-3 py-1.5 bg-slate-100 border border-slate-300 text-slate-700 rounded-xl text-xs font-bold flex items-center space-x-1.5">
                             <Camera className="w-3.5 h-3.5" />
                             <span>Snap Photo</span>
                           </button>
@@ -805,189 +723,131 @@ export default function PhlebotomyStationPage() {
                           <Lock className="w-3.5 h-3.5 text-amber-600" />
                           <span>Barcode Locked to {selectedEmp.labKitBarcode}</span>
                         </span>
-                        <button
-                          type="button"
-                          onClick={handleRequestBarcodeUnlock}
-                          className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold text-[11px]"
-                        >
+                        <button type="button" onClick={handleRequestBarcodeUnlock} className="px-2.5 py-1 bg-amber-600 text-white rounded-lg font-bold text-[11px]">
                           Request Coordinator Unlock
                         </button>
                       </div>
                     )}
 
-                    <div className="relative">
-                      <Barcode className="w-5 h-5 absolute left-3 top-3 text-slate-400" />
-                      <input
-                        ref={barcodeRef}
-                        type="text"
-                        required
-                        readOnly={selectedEmp.barcodeLocked}
-                        placeholder="Point camera at barcode to auto-fill, or type manually..."
-                        value={barcodeInput}
-                        onChange={(e) => setBarcodeInput(e.target.value.toUpperCase())}
-                        className="w-full pl-10 pr-3 py-2.5 border-2 border-rose-500 rounded-xl text-sm font-mono font-black text-[#002642] uppercase tracking-wider read-only:bg-slate-100 read-only:border-slate-300"
-                      />
-                    </div>
+                    <input
+                      ref={barcodeRef}
+                      type="text"
+                      required
+                      readOnly={selectedEmp.barcodeLocked}
+                      placeholder="Scan or type barcode..."
+                      value={barcodeInput}
+                      onChange={(e) => {
+                        const val = e.target.value.toUpperCase();
+                        setBarcodeInput(val);
+                        if (val.length >= 4) validateBarcodeInstant(val);
+                      }}
+                      className="w-full px-4 py-2.5 border-2 border-rose-500 rounded-xl text-sm font-mono font-black text-[#002642] uppercase read-only:bg-slate-100 read-only:border-slate-300"
+                    />
                   </div>
 
-                  {/* Sample Checkboxes */}
-                  <div className="pt-3 border-t border-slate-100 space-y-3">
-                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                      Sample Verification Checklist
-                    </h4>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <label
-                        onClick={() => setBloodCollected(!bloodCollected)}
-                        className={`cursor-pointer border-2 rounded-xl p-4 flex items-center space-x-3 transition select-none ${
-                          bloodCollected ? "border-rose-600 bg-rose-50/70 text-rose-950" : "border-slate-200 bg-white"
-                        }`}
-                      >
-                        <input type="checkbox" checked={bloodCollected} onChange={() => {}} className="w-5 h-5 rounded text-rose-600" />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <label onClick={() => setBloodCollected(!bloodCollected)} className={`cursor-pointer border-2 rounded-xl p-4 flex items-center space-x-3 ${bloodCollected ? "border-rose-600 bg-rose-50/70" : "border-slate-200"}`}>
+                      <input type="checkbox" checked={bloodCollected} onChange={() => {}} className="w-5 h-5" />
+                      <div>
+                        <div className="font-black text-sm">Blood Sample Collected</div>
+                        <div className="text-[10px] text-slate-500">EDTA / Plain / Fluoride tubes</div>
+                      </div>
+                    </label>
+                    <label onClick={() => setUrineCollected(!urineCollected)} className={`cursor-pointer border-2 rounded-xl p-4 flex items-center space-x-3 ${urineCollected ? "border-amber-600 bg-amber-50/70" : "border-slate-200"}`}>
+                      <input type="checkbox" checked={urineCollected} onChange={() => {}} className="w-5 h-5" />
+                      <div>
+                        <div className="font-black text-sm">Urine Sample Collected</div>
+                        <div className="text-[10px] text-slate-500">Leave unchecked if pending</div>
+                      </div>
+                    </label>
+                    {selectedEmp.specialContainerRequired && (
+                      <label onClick={() => setSpecialCollected(!specialCollected)} className={`sm:col-span-2 cursor-pointer border-2 rounded-xl p-4 flex items-center space-x-3 ${specialCollected ? "border-purple-600 bg-purple-50/70" : "border-slate-200"}`}>
+                        <input type="checkbox" checked={specialCollected} onChange={() => {}} className="w-5 h-5" />
                         <div>
-                          <div className="font-black text-sm">Blood Sample Collected</div>
-                          <div className="text-[10px] text-slate-500">EDTA / Plain / Fluoride tubes</div>
+                          <div className="font-black text-sm">Special Container: {selectedEmp.specialContainerName || "Heavy Metal Tube"}</div>
                         </div>
                       </label>
-
-                      <label
-                        onClick={() => setUrineCollected(!urineCollected)}
-                        className={`cursor-pointer border-2 rounded-xl p-4 flex items-center space-x-3 transition select-none ${
-                          urineCollected ? "border-amber-600 bg-amber-50/70 text-amber-950" : "border-slate-200 bg-white"
-                        }`}
-                      >
-                        <input type="checkbox" checked={urineCollected} onChange={() => {}} className="w-5 h-5 rounded text-amber-600" />
-                        <div>
-                          <div className="font-black text-sm">Urine Sample Collected</div>
-                          <div className="text-[10px] text-slate-500">Leave unchecked if pending</div>
-                        </div>
-                      </label>
-
-                      {selectedEmp.specialContainerRequired && (
-                        <label
-                          onClick={() => setSpecialCollected(!specialCollected)}
-                          className={`sm:col-span-2 cursor-pointer border-2 rounded-xl p-4 flex items-center space-x-3 transition select-none ${
-                            specialCollected ? "border-purple-600 bg-purple-50/70 text-purple-950" : "border-slate-200 bg-white"
-                          }`}
-                        >
-                          <input type="checkbox" checked={specialCollected} onChange={() => {}} className="w-5 h-5 rounded text-purple-600" />
-                          <div>
-                            <div className="font-black text-sm">
-                              Special Container: {selectedEmp.specialContainerName || "Heavy Metal Tube"}
-                            </div>
-                            <div className="text-[10px] text-slate-500">Required per client/registration profile</div>
-                          </div>
-                        </label>
-                      )}
-                    </div>
+                    )}
                   </div>
 
-                  <div className="pt-4 border-t border-slate-100 flex justify-end">
-                    <button
-                      type="submit"
-                      disabled={isSubmitting}
-                      className="px-6 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-md transition disabled:opacity-50"
-                    >
-                      {isSubmitting ? "Securing Samples..." : "Confirm Collection & Lock Barcode"}
+                  <div className="flex justify-end">
+                    <button type="submit" disabled={isSubmitting} className="px-6 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-md">
+                      {isSubmitting ? "Securing..." : "Confirm Collection & Lock Barcode"}
                     </button>
                   </div>
                 </form>
               ) : (
-                <div className="text-center py-20 text-slate-400 text-xs">
-                  Select a checked-in patient from the left queue to scan pre-applied barcode kit.
-                </div>
+                <div className="text-center py-20 text-slate-400 text-xs">Select a patient from the queue.</div>
               )}
             </div>
           </div>
         )}
 
-        {/* MODE 2: SCAN-TO-VERIFY DEFERRED URINE */}
+        {/* MODE 2: SCAN-TO-VERIFY URINE */}
         {mode === "VERIFY_URINE" && (
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-5 max-w-2xl">
-            <div>
-              <h2 className="text-lg font-black text-[#002642]">Scan-to-Verify Dropped Urine Container</h2>
-              <p className="text-xs text-slate-500">
-                When an employee drops off their urine container later, scan their barcode to auto-fetch their record and mark Urine Collected.
-              </p>
-            </div>
-
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4 max-w-2xl">
+            <h2 className="text-lg font-black text-[#002642]">Scan-to-Verify Dropped Urine (Selected Camp Only)</h2>
             <div className="flex flex-wrap gap-2">
               <input
                 type="text"
                 placeholder="Scan or type barcode..."
                 value={quickScanInput}
                 onChange={(e) => setQuickScanInput(e.target.value.toUpperCase())}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    handleVerifyUrineLookup(quickScanInput, true);
-                  }
-                }}
+                onKeyDown={(e) => e.key === "Enter" && handleVerifyUrineLookup(quickScanInput, true)}
                 className="flex-1 min-w-[200px] px-3 py-2 border-2 border-amber-500 rounded-xl text-sm font-mono font-bold uppercase"
               />
-              <button
-                type="button"
-                onClick={() => setIsLiveScanning(true)}
-                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5"
-              >
+              <button type="button" onClick={() => setIsLiveScanning(true)} className="px-4 py-2 bg-rose-600 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5">
                 <Smartphone className="w-4 h-4" />
                 <span>Live Scanner</span>
               </button>
-              <button
-                type="button"
-                onClick={() => handleVerifyUrineLookup(quickScanInput, true)}
-                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold"
-              >
+              <button type="button" onClick={() => handleVerifyUrineLookup(quickScanInput, true)} className="px-4 py-2 bg-amber-600 text-white rounded-xl text-xs font-bold">
                 Verify & Mark Urine
               </button>
             </div>
-
             {verifiedUrineEmp && (
-              <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-xs space-y-1">
-                <div className="font-black text-sm text-emerald-950">{verifiedUrineEmp.fullName}</div>
-                <div className="font-mono text-emerald-800">
-                  UHID: {verifiedUrineEmp.uhid} | Barcode: {verifiedUrineEmp.labKitBarcode}
-                </div>
-                <div className="text-indigo-700 font-bold">Agency: {verifiedUrineEmp.agencyName}</div>
-                <div className="pt-1 font-bold text-emerald-700">
-                  Blood: {verifiedUrineEmp.bloodCollected ? "DONE" : "PENDING"} • Urine:{" "}
-                  {verifiedUrineEmp.urineCollected ? "DONE" : "PENDING"}
-                </div>
+              <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-xs">
+                <div className="font-black text-sm">{verifiedUrineEmp.fullName} ({verifiedUrineEmp.uhid})</div>
+                <div>Agency: {verifiedUrineEmp.agencyName} • Blood: {verifiedUrineEmp.bloodCollected ? "DONE" : "PENDING"} • Urine: {verifiedUrineEmp.urineCollected ? "DONE" : "PENDING"}</div>
               </div>
             )}
           </div>
         )}
 
-        {/* MODE 3: LAB HANDOVER (CAMP -> RIDER -> LAB) */}
+        {/* MODE 3: LAB HANDOVER (MULTI-BATCH + CARRIED SAMPLES EXCEL) */}
         {mode === "HANDOVER" && (
           <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-5">
-            <div>
-              <h2 className="text-lg font-black text-[#002642]">Bulk Lab Handover Re-Verification</h2>
-              <p className="text-xs text-slate-500">
-                Re-scan every zip bag and urine container before handing over to the Rider for the Lab.
-              </p>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h2 className="text-lg font-black text-[#002642]">Bulk Lab Handover (Multi-Batch + Dual Ack)</h2>
+                <p className="text-xs text-slate-500">Exports ONLY carried/collected samples in DDMMYYYY, HHMMSS format.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleExportExcel(true)}
+                disabled={isExporting}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5"
+              >
+                <FileSpreadsheet className="w-4 h-4" />
+                <span>Download Handover Excel (Carried Samples Only)</span>
+              </button>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
               <div>
                 <label className="block font-bold text-slate-600 mb-1">Phlebotomist Name *</label>
-                <input
-                  type="text"
-                  value={phleboName}
-                  onChange={(e) => setPhleboName(e.target.value)}
-                  placeholder="e.g. Rahul Parmar"
-                  className="w-full px-3 py-2 border border-slate-300 rounded-xl"
-                />
+                <input type="text" value={phleboName} onChange={(e) => setPhleboName(e.target.value)} placeholder="e.g. Rahul Parmar" className="w-full px-3 py-2 border rounded-xl" />
+                <label className="flex items-center space-x-2 mt-2 font-bold text-slate-700 cursor-pointer">
+                  <input type="checkbox" checked={phleboAck} onChange={(e) => setPhleboAck(e.target.checked)} />
+                  <span>Phlebotomist Acknowledges Samples Handed Over</span>
+                </label>
               </div>
               <div>
                 <label className="block font-bold text-slate-600 mb-1">Lab Rider Name *</label>
-                <input
-                  type="text"
-                  value={riderName}
-                  onChange={(e) => setRiderName(e.target.value)}
-                  placeholder="e.g. Mahesh Solanki"
-                  className="w-full px-3 py-2 border border-slate-300 rounded-xl"
-                />
+                <input type="text" value={riderName} onChange={(e) => setRiderName(e.target.value)} placeholder="e.g. Mahesh Solanki" className="w-full px-3 py-2 border rounded-xl" />
+                <label className="flex items-center space-x-2 mt-2 font-bold text-slate-700 cursor-pointer">
+                  <input type="checkbox" checked={riderAck} onChange={(e) => setRiderAck(e.target.checked)} />
+                  <span>Rider Acknowledges Physical Receipt</span>
+                </label>
               </div>
             </div>
 
@@ -997,59 +857,45 @@ export default function PhlebotomyStationPage() {
                 placeholder="Scan sample barcode into handover box..."
                 value={quickScanInput}
                 onChange={(e) => setQuickScanInput(e.target.value.toUpperCase())}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    handleHandoverScanLookup(quickScanInput);
-                  }
-                }}
+                onKeyDown={(e) => e.key === "Enter" && handleHandoverScanLookup(quickScanInput)}
                 className="flex-1 min-w-[200px] px-3 py-2 border-2 border-indigo-500 rounded-xl text-sm font-mono font-bold uppercase"
               />
-              <button
-                type="button"
-                onClick={() => setIsLiveScanning(true)}
-                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5"
-              >
+              <button type="button" onClick={() => setIsLiveScanning(true)} className="px-4 py-2 bg-rose-600 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5">
                 <Smartphone className="w-4 h-4" />
                 <span>Scan via Camera</span>
               </button>
-              <button
-                type="button"
-                onClick={() => handleHandoverScanLookup(quickScanInput)}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold"
-              >
+              <button type="button" onClick={() => handleHandoverScanLookup(quickScanInput)} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold">
                 Add to Handover
               </button>
             </div>
 
-            <div className="border border-slate-200 rounded-xl overflow-hidden">
-              <div className="bg-slate-50 px-4 py-2 text-xs font-bold text-slate-600 flex justify-between">
-                <span>Verified in Handover Box ({handoverScannedEmps.length})</span>
-                <span>Pending Urine in Camp: {employees.filter((e) => e.bloodCollected && !e.urineCollected).length}</span>
-              </div>
-              <div className="divide-y divide-slate-100 max-h-64 overflow-y-auto">
-                {handoverScannedEmps.map((emp) => (
-                  <div key={emp.id} className="px-4 py-2.5 flex items-center justify-between text-xs">
-                    <div>
-                      <span className="font-bold text-[#002642]">{emp.fullName}</span>{" "}
-                      <span className="font-mono text-slate-500">({emp.labKitBarcode})</span>
-                    </div>
-                    <div className="flex gap-1.5 font-mono text-[10px] font-bold">
-                      <span className={`px-2 py-0.5 rounded ${emp.bloodCollected ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-700"}`}>
-                        Blood: {emp.bloodCollected ? "OK" : "MISSING"}
+            <div className="border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100 max-h-64 overflow-y-auto">
+              {handoverScannedEmps.map((emp) => (
+                <div key={emp.id} className="px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div>
+                    <span className="font-bold text-[#002642]">{emp.fullName}</span>{" "}
+                    <span className="font-mono text-slate-500">({emp.labKitBarcode})</span>
+                    {emp.handoverVerified && (
+                      <span className="ml-2 px-2 py-0.5 bg-amber-100 text-amber-800 rounded text-[10px] font-bold">
+                        FLAG: Prev Batch #{emp.handoverBatchNumber}
                       </span>
-                      <span className={`px-2 py-0.5 rounded ${emp.urineCollected ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>
-                        Urine: {emp.urineCollected ? "OK" : "MISSING"}
+                    )}
+                  </div>
+                  <div className="flex gap-1.5 font-mono text-[10px] font-bold">
+                    <span className={`px-2 py-0.5 rounded ${emp.bloodCollected ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-700"}`}>
+                      Blood: {emp.bloodCollected ? "OK" : "MISSING"}
+                    </span>
+                    <span className={`px-2 py-0.5 rounded ${emp.urineCollected ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>
+                      Urine: {emp.urineCollected ? "OK" : "MISSING"}
+                    </span>
+                    {emp.specialContainerRequired && (
+                      <span className={`px-2 py-0.5 rounded ${emp.specialContainerCollected ? "bg-purple-100 text-purple-800" : "bg-rose-100 text-rose-700"}`}>
+                        {emp.specialContainerName || "Special"}: {emp.specialContainerCollected ? "OK" : "MISSING"}
                       </span>
-                    </div>
+                    )}
                   </div>
-                ))}
-                {handoverScannedEmps.length === 0 && (
-                  <div className="p-6 text-center text-xs text-slate-400">
-                    Scan barcodes above to build the handover manifest.
-                  </div>
-                )}
-              </div>
+                </div>
+              ))}
             </div>
 
             <div className="flex justify-end">
@@ -1059,7 +905,7 @@ export default function PhlebotomyStationPage() {
                 disabled={handoverScannedEmps.length === 0}
                 className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md disabled:opacity-40"
               >
-                Confirm Handover ({handoverScannedEmps.length} Samples)
+                Confirm Handover Batch ({handoverScannedEmps.length} Samples)
               </button>
             </div>
           </div>

@@ -12,14 +12,70 @@ import {
   services,
   users,
   auditLogs,
+  labParameterAliases,
   stationTypeEnum,
 } from "@/db/schema";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { nanoid } from "nanoid";
 import { getSession } from "@/lib/auth";
 
-// 0. Get Diagnostic Technician RBAC Scope
+const DEFAULT_LAB_ALIASES = [
+  { canonicalKey: "hb", displayLabel: "Hemoglobin (Hb)", aliases: ["HB", "HEMOGLOBIN", "HAEMOGLOBIN"] },
+  { canonicalKey: "wbc", displayLabel: "WBC / TLC", aliases: ["WBC", "TOTAL LEUKOCYTE", "TLC", "WHITE BLOOD CELL"] },
+  { canonicalKey: "platelets", displayLabel: "Platelets", aliases: ["PLATELET", "PLATELETS", "PLT"] },
+  { canonicalKey: "esr", displayLabel: "ESR", aliases: ["ESR", "ERYTHROCYTE SEDIMENTATION"] },
+  { canonicalKey: "sgpt", displayLabel: "SGPT / ALT", aliases: ["SGPT", "ALT (SGPT) SERUM", "ALT (SGPT)", "ALT", "ALANINE AMINOTRANSFERASE"] },
+  { canonicalKey: "creatinine", displayLabel: "S. Creatinine", aliases: ["S. CREATININE", "SERUM CREATININE", "CREATININE", "S.CREAT"] },
+  { canonicalKey: "rbs", displayLabel: "RBS (Random Blood Sugar)", aliases: ["RBS", "RANDOM BLOOD SUGAR", "BLOOD GLUCOSE RANDOM", "GLUCOSE RANDOM"] },
+  { canonicalKey: "hba1c", displayLabel: "HbA1c", aliases: ["HBA1C", "GLYCOSYLATED HEMOGLOBIN", "A1C"] },
+  { canonicalKey: "widal", displayLabel: "Widal Profile", aliases: ["WIDAL", "WIDAL TEST", "WIDAL PROFILE"] },
+  { canonicalKey: "bloodGroup", displayLabel: "Blood Group", aliases: ["BLOOD GROUP", "ABO GROUP", "BLOOD TYPE"] },
+];
+
+export async function getLabParameterAliases() {
+  try {
+    const rows = await db.select().from(labParameterAliases).orderBy(labParameterAliases.displayLabel);
+    if (rows.length === 0) return DEFAULT_LAB_ALIASES;
+    return rows;
+  } catch {
+    return DEFAULT_LAB_ALIASES;
+  }
+}
+
+export async function saveLabParameterAlias(params: {
+  canonicalKey: string;
+  displayLabel: string;
+  aliases: string[];
+}) {
+  try {
+    const cleanKey = params.canonicalKey.trim();
+    const cleanAliases = Array.from(new Set(params.aliases.map((a) => a.trim().toUpperCase()).filter(Boolean)));
+    await db
+      .insert(labParameterAliases)
+      .values({
+        id: `alias_${nanoid(8)}`,
+        canonicalKey: cleanKey,
+        displayLabel: params.displayLabel.trim(),
+        aliases: cleanAliases,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: labParameterAliases.canonicalKey,
+        set: {
+          displayLabel: params.displayLabel.trim(),
+          aliases: cleanAliases,
+          updatedAt: new Date(),
+        },
+      });
+    revalidatePath("/admin/services");
+    revalidatePath("/lab");
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
 export async function getDiagnosticTechnicianScope() {
   try {
     const session = await getSession();
@@ -39,7 +95,6 @@ export async function getDiagnosticTechnicianScope() {
   }
 }
 
-// 1. Get queue for a specific station with arrival status, BMI, lock & agency name
 export async function getStationQueue(
   campId: string,
   station: (typeof stationTypeEnum.enumValues)[number]
@@ -70,9 +125,7 @@ export async function getStationQueue(
       .from(stationChecklist)
       .innerJoin(employees, eq(stationChecklist.employeeId, employees.id))
       .leftJoin(agencies, eq(employees.agencyId, agencies.id))
-      .where(
-        and(eq(stationChecklist.campId, campId), eq(stationChecklist.station, station))
-      )
+      .where(and(eq(stationChecklist.campId, campId), eq(stationChecklist.station, station)))
       .orderBy(stationChecklist.arrivalStatus, employees.uhid);
 
     return queue;
@@ -82,7 +135,6 @@ export async function getStationQueue(
   }
 }
 
-// 2. Toggle Employee Arrived at Diagnostic Desk (Mark As Arrived <-> Arrived)
 export async function markDiagnosticArrived(
   employeeId: string,
   campId: string,
@@ -101,7 +153,22 @@ export async function markDiagnosticArrived(
       )
       .limit(1);
 
-    const current = existing[0]?.arrivalStatus || "PENDING";
+    if (existing.length === 0) {
+      await db.insert(stationChecklist).values({
+        id: `chk_${nanoid(10)}`,
+        employeeId,
+        campId,
+        station,
+        arrivalStatus: "ARRIVED",
+        arrivedAt: new Date(),
+        isLocked: false,
+      });
+      revalidatePath("/diagnostics");
+      revalidatePath("/lab");
+      return { success: true, arrivalStatus: "ARRIVED" as const };
+    }
+
+    const current = existing[0].arrivalStatus;
     const nextStatus = current === "ARRIVED" ? "PENDING" : "ARRIVED";
 
     await db
@@ -110,13 +177,7 @@ export async function markDiagnosticArrived(
         arrivalStatus: nextStatus,
         arrivedAt: nextStatus === "ARRIVED" ? new Date() : null,
       })
-      .where(
-        and(
-          eq(stationChecklist.employeeId, employeeId),
-          eq(stationChecklist.campId, campId),
-          eq(stationChecklist.station, station)
-        )
-      );
+      .where(eq(stationChecklist.id, existing[0].id));
 
     revalidatePath("/diagnostics");
     revalidatePath("/lab");
@@ -126,11 +187,9 @@ export async function markDiagnosticArrived(
   }
 }
 
-// 3. Instant Barcode / UHID Lookup
 export async function lookupEmployeeByBarcode(campId: string, barcodeOrUhid: string) {
   try {
     const cleanQuery = barcodeOrUhid.trim().toUpperCase();
-
     const emp = await db
       .select({
         id: employees.id,
@@ -157,13 +216,11 @@ export async function lookupEmployeeByBarcode(campId: string, barcodeOrUhid: str
       .limit(1);
 
     return emp[0] || null;
-  } catch (err) {
-    console.error("Barcode lookup error:", err);
+  } catch {
     return null;
   }
 }
 
-// 4. Save Diagnostic Results & Media (With Post-Save Lock)
 export async function saveDiagnosticResult(params: {
   employeeId: string;
   campId: string;
@@ -172,6 +229,8 @@ export async function saveDiagnosticResult(params: {
   structuredData?: Record<string, any>;
   findingsSummary: string;
   isAbnormal?: boolean;
+  identityMismatch?: boolean;
+  identityMismatchNote?: string;
   attachmentUrls?: string[];
   capturedAfterCamp?: boolean;
   extractedViaOcr?: boolean;
@@ -179,7 +238,7 @@ export async function saveDiagnosticResult(params: {
 }) {
   try {
     const lockCheck = await db
-      .select({ isLocked: stationChecklist.isLocked })
+      .select({ isLocked: stationChecklist.isLocked, arrivalStatus: stationChecklist.arrivalStatus })
       .from(stationChecklist)
       .where(
         and(
@@ -191,10 +250,10 @@ export async function saveDiagnosticResult(params: {
       .limit(1);
 
     if (lockCheck[0]?.isLocked) {
-      return {
-        success: false,
-        error: "Entry is LOCKED. Request Camp Coordinator approval to rewrite.",
-      };
+      return { success: false, error: "Entry is LOCKED. Request Camp Coordinator approval to rewrite." };
+    }
+    if (lockCheck.length === 0 || lockCheck[0].arrivalStatus !== "ARRIVED") {
+      return { success: false, error: "Mandatory: Click 'Mark As Arrived' first before saving." };
     }
 
     const serviceRecord = await db
@@ -215,6 +274,8 @@ export async function saveDiagnosticResult(params: {
       structuredData: params.structuredData || {},
       findingsSummary: params.findingsSummary.trim(),
       isAbnormal: params.isAbnormal || false,
+      identityMismatch: params.identityMismatch || false,
+      identityMismatchNote: params.identityMismatchNote || null,
       attachmentUrls: params.attachmentUrls || [],
       capturedAfterCamp: params.capturedAfterCamp || false,
       extractedViaOcr: params.extractedViaOcr || false,
@@ -244,55 +305,80 @@ export async function saveDiagnosticResult(params: {
     return { success: true };
   } catch (error: any) {
     console.error("Save diagnostic error:", error);
-    const msg = error.cause?.message || error.detail || error.message;
-    return { success: false, error: msg };
+    return { success: false, error: error.cause?.message || error.detail || error.message };
   }
 }
 
-// 5. Dedicated Lab Queue & Pathology Result Saver
+// Deduplicated Lab Queue with each employee's own saved lab values
 export async function getLabQueue(campId: string) {
   try {
-    const rows = await db
-      .select({
-        employeeId: employees.id,
-        uhid: employees.uhid,
-        empCode: employees.empCode,
-        fullName: employees.fullName,
-        age: employees.age,
-        gender: employees.gender,
-        department: employees.department,
-        bloodGroup: employees.bloodGroup,
-        heightCm: employees.heightCm,
-        weightKg: employees.weightKg,
-        bmi: employees.bmi,
-        labKitBarcode: employees.labKitBarcode,
-        bloodCollected: employees.bloodCollected,
-        urineCollected: employees.urineCollected,
-        agencyName: agencies.name,
-        checklistStatus: stationChecklist.status,
-        arrivalStatus: stationChecklist.arrivalStatus,
-        isLocked: stationChecklist.isLocked,
-      })
-      .from(employees)
-      .leftJoin(agencies, eq(employees.agencyId, agencies.id))
-      .leftJoin(
-        stationChecklist,
-        and(
-          eq(stationChecklist.employeeId, employees.id),
-          eq(stationChecklist.campId, campId),
-          eq(stationChecklist.station, "PATHOLOGY_LAB")
+    const [rows, labRecords] = await Promise.all([
+      db
+        .select({
+          employeeId: employees.id,
+          uhid: employees.uhid,
+          empCode: employees.empCode,
+          fullName: employees.fullName,
+          age: employees.age,
+          gender: employees.gender,
+          department: employees.department,
+          bloodGroup: employees.bloodGroup,
+          heightCm: employees.heightCm,
+          weightKg: employees.weightKg,
+          bmi: employees.bmi,
+          labKitBarcode: employees.labKitBarcode,
+          bloodCollected: employees.bloodCollected,
+          urineCollected: employees.urineCollected,
+          agencyName: agencies.name,
+          checklistStatus: stationChecklist.status,
+          arrivalStatus: stationChecklist.arrivalStatus,
+          isLocked: stationChecklist.isLocked,
+        })
+        .from(employees)
+        .leftJoin(agencies, eq(employees.agencyId, agencies.id))
+        .leftJoin(
+          stationChecklist,
+          and(
+            eq(stationChecklist.employeeId, employees.id),
+            eq(stationChecklist.campId, campId),
+            eq(stationChecklist.station, "PATHOLOGY_LAB")
+          )
         )
-      )
-      .where(and(eq(employees.campId, campId), eq(employees.checkInStatus, "CHECKED_IN")))
-      .orderBy(employees.uhid);
+        .where(and(eq(employees.campId, campId), eq(employees.checkInStatus, "CHECKED_IN")))
+        .orderBy(employees.uhid),
+      db
+        .select()
+        .from(diagnosticRecords)
+        .where(and(eq(diagnosticRecords.campId, campId), eq(diagnosticRecords.station, "PATHOLOGY_LAB")))
+        .orderBy(desc(diagnosticRecords.createdAt)),
+    ]);
 
-    return rows.map((r) => ({
-      ...r,
-      agencyName: r.agencyName || "Direct Payroll",
-      checklistStatus: r.checklistStatus || "PENDING",
-      arrivalStatus: r.arrivalStatus || "PENDING",
-      isLocked: Boolean(r.isLocked),
-    }));
+    const recordMap = new Map<string, any>();
+    for (const rec of labRecords) {
+      if (!recordMap.has(rec.employeeId)) recordMap.set(rec.employeeId, rec);
+    }
+
+    const seen = new Set<string>();
+    const uniqueQueue = [];
+    for (const r of rows) {
+      if (!seen.has(r.employeeId)) {
+        seen.add(r.employeeId);
+        const savedRec = recordMap.get(r.employeeId);
+        uniqueQueue.push({
+          ...r,
+          agencyName: r.agencyName || "Direct Payroll",
+          checklistStatus: r.checklistStatus || "PENDING",
+          arrivalStatus: r.arrivalStatus || "PENDING",
+          isLocked: Boolean(r.isLocked),
+          savedLabData: savedRec?.structuredData || null,
+          savedFindings: savedRec?.findingsSummary || null,
+          savedAbnormal: Boolean(savedRec?.isAbnormal),
+          identityMismatch: Boolean(savedRec?.identityMismatch),
+          identityMismatchNote: savedRec?.identityMismatchNote || null,
+        });
+      }
+    }
+    return uniqueQueue;
   } catch (err) {
     console.error("getLabQueue error:", err);
     return [];
@@ -303,20 +389,11 @@ export async function saveLabPathologyResult(params: {
   employeeId: string;
   campId: string;
   bloodGroup?: string;
-  labValues: {
-    hb?: string;
-    wbc?: string;
-    platelets?: string;
-    esr?: string;
-    sgpt?: string;
-    creatinine?: string;
-    widal?: string;
-    rbs?: string;
-    urineRm?: string;
-    heavyMetal?: string;
-  };
+  labValues: Record<string, string>;
   findingsSummary: string;
   isAbnormal: boolean;
+  identityMismatch?: boolean;
+  identityMismatchNote?: string;
   extractedViaOcr: boolean;
   attachmentUrls?: string[];
 }) {
@@ -335,39 +412,56 @@ export async function saveLabPathologyResult(params: {
     structuredData: params.labValues,
     findingsSummary: params.findingsSummary,
     isAbnormal: params.isAbnormal,
+    identityMismatch: params.identityMismatch,
+    identityMismatchNote: params.identityMismatchNote,
     extractedViaOcr: params.extractedViaOcr,
     attachmentUrls: params.attachmentUrls || [],
     enteredBy: "Lab Technician",
   });
 }
 
-// 6. Office Doctor Full Dossier Fetch + Direct Clinical Edit
+export async function getLabMismatchAlerts(campId?: string) {
+  try {
+    const q = db
+      .select({
+        id: diagnosticRecords.id,
+        employeeId: diagnosticRecords.employeeId,
+        employeeName: employees.fullName,
+        uhid: employees.uhid,
+        campId: diagnosticRecords.campId,
+        note: diagnosticRecords.identityMismatchNote,
+        createdAt: diagnosticRecords.createdAt,
+      })
+      .from(diagnosticRecords)
+      .innerJoin(employees, eq(diagnosticRecords.employeeId, employees.id))
+      .where(
+        campId && campId !== "all"
+          ? and(eq(diagnosticRecords.identityMismatch, true), eq(diagnosticRecords.campId, campId))
+          : eq(diagnosticRecords.identityMismatch, true)
+      )
+      .orderBy(desc(diagnosticRecords.createdAt));
+
+    return await q;
+  } catch {
+    return [];
+  }
+}
+
 export async function getEmployeeFullDossier(employeeId: string, campId: string) {
   try {
     const [empRows, fieldExamRows, diagRows, reviewRows] = await Promise.all([
       db
-        .select({
-          employee: employees,
-          agencyName: agencies.name,
-        })
+        .select({ employee: employees, agencyName: agencies.name })
         .from(employees)
         .leftJoin(agencies, eq(employees.agencyId, agencies.id))
         .where(eq(employees.id, employeeId))
         .limit(1),
-      db
-        .select()
-        .from(fieldDoctorExams)
-        .where(eq(fieldDoctorExams.employeeId, employeeId))
-        .limit(1),
+      db.select().from(fieldDoctorExams).where(eq(fieldDoctorExams.employeeId, employeeId)).limit(1),
       db
         .select()
         .from(diagnosticRecords)
         .where(and(eq(diagnosticRecords.employeeId, employeeId), eq(diagnosticRecords.campId, campId))),
-      db
-        .select()
-        .from(doctorReviews)
-        .where(eq(doctorReviews.employeeId, employeeId))
-        .limit(1),
+      db.select().from(doctorReviews).where(eq(doctorReviews.employeeId, employeeId)).limit(1),
     ]);
 
     return {
@@ -377,8 +471,7 @@ export async function getEmployeeFullDossier(employeeId: string, campId: string)
       diagnostics: diagRows,
       review: reviewRows[0] || null,
     };
-  } catch (err) {
-    console.error("getEmployeeFullDossier error:", err);
+  } catch {
     return null;
   }
 }

@@ -8,6 +8,7 @@ import {
   clients,
   agencies,
   clientPackages,
+  services,
   stationChecklist,
   diagnosticRecords,
   fieldDoctorExams,
@@ -17,13 +18,21 @@ import {
   auditLogs,
   stationTypeEnum,
 } from "@/db/schema";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { nanoid } from "nanoid";
 import { getSession } from "@/lib/auth";
 
+function formatDDMMYYYY_HHMMSS(dateInput: Date | string | null | undefined): string {
+  if (!dateInput) return "-";
+  const d = new Date(dateInput);
+  if (isNaN(d.getTime())) return "-";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getDate())}${pad(d.getMonth() + 1)}${d.getFullYear()}, ${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
 // =========================================================================
-// 1. RECEPTION: CHECK-IN + HEIGHT/WEIGHT/BMI + DYNAMIC STATION ROUTING
+// 1. RECEPTION: CHECK-IN + EXACT PACKAGE ROUTING
 // =========================================================================
 
 export async function receptionCheckIn(params: {
@@ -65,40 +74,44 @@ export async function receptionCheckIn(params: {
       })
       .where(eq(employees.id, params.employeeId));
 
-    const campRecord = await db.query.camps.findFirst({
-      where: eq(camps.id, params.campId),
-    });
-
-    let activeCodes: string[] = [];
+    let activeServiceIds: string[] = [];
     if (params.customServiceIds && params.customServiceIds.length > 0) {
-      activeCodes = params.customServiceIds;
-    } else if (campRecord) {
-      const pkg = await db.query.clientPackages.findFirst({
-        where: eq(clientPackages.id, campRecord.packageId),
+      activeServiceIds = params.customServiceIds;
+    } else {
+      const campRecord = await db.query.camps.findFirst({
+        where: eq(camps.id, params.campId),
       });
-      activeCodes = pkg?.activeServiceIds || [];
+      if (campRecord) {
+        const pkg = await db.query.clientPackages.findFirst({
+          where: eq(clientPackages.id, campRecord.packageId),
+        });
+        activeServiceIds = pkg?.activeServiceIds || [];
+      }
     }
 
-    const stationsSet = new Set<(typeof stationTypeEnum.enumValues)[number]>([
-      "NURSING_STATION",
-      "FIELD_DOCTOR_EXAM",
-      "OFFICE_DOCTOR_REVIEW",
-    ]);
+    const stationsSet = new Set<(typeof stationTypeEnum.enumValues)[number]>();
+    if (activeServiceIds.length > 0) {
+      const matchedServices = await db
+        .select({ station: services.station })
+        .from(services)
+        .where(inArray(services.id, activeServiceIds));
+      matchedServices.forEach((s) => stationsSet.add(s.station));
+    }
 
-    if (activeCodes.some((c) => c.includes("cbc") || c.includes("sugar") || c.includes("blood") || c.includes("phleb"))) {
-      stationsSet.add("PHLEBOTOMY");
-    }
-    if (activeCodes.some((c) => c.includes("pft") || c.includes("spiro"))) {
-      stationsSet.add("SPIROMETRY_PFT");
-    }
-    if (activeCodes.some((c) => c.includes("audio"))) {
-      stationsSet.add("AUDIOMETRY");
-    }
-    if (activeCodes.some((c) => c.includes("xray"))) {
-      stationsSet.add("CHEST_XRAY");
-    }
-    if (activeCodes.some((c) => c.includes("ecg"))) {
-      stationsSet.add("ECG");
+    // Fallback keyword mapping only if service IDs didn't match DB rows
+    if (stationsSet.size === 0 && activeServiceIds.length > 0) {
+      if (activeServiceIds.some((c) => c.includes("vital"))) stationsSet.add("NURSING_STATION");
+      if (activeServiceIds.some((c) => c.includes("cbc") || c.includes("sugar") || c.includes("blood") || c.includes("phleb"))) {
+        stationsSet.add("PHLEBOTOMY");
+      }
+      if (activeServiceIds.some((c) => c.includes("pft") || c.includes("spiro"))) stationsSet.add("SPIROMETRY_PFT");
+      if (activeServiceIds.some((c) => c.includes("audio"))) stationsSet.add("AUDIOMETRY");
+      if (activeServiceIds.some((c) => c.includes("xray"))) stationsSet.add("CHEST_XRAY");
+      if (activeServiceIds.some((c) => c.includes("ecg"))) stationsSet.add("ECG");
+      if (activeServiceIds.some((c) => c.includes("doc"))) {
+        stationsSet.add("FIELD_DOCTOR_EXAM");
+        stationsSet.add("OFFICE_DOCTOR_REVIEW");
+      }
     }
 
     const checklistEntries = Array.from(stationsSet).map((station) => ({
@@ -110,7 +123,9 @@ export async function receptionCheckIn(params: {
       isLocked: false,
     }));
 
-    await db.insert(stationChecklist).values(checklistEntries).onConflictDoNothing();
+    if (checklistEntries.length > 0) {
+      await db.insert(stationChecklist).values(checklistEntries).onConflictDoNothing();
+    }
 
     revalidatePath("/reception");
     revalidatePath("/admin");
@@ -154,6 +169,7 @@ export async function getStationEmployeesWithStatus(
         specialContainerName: employees.specialContainerName,
         specialContainerCollected: employees.specialContainerCollected,
         handoverVerified: employees.handoverVerified,
+        handoverBatchNumber: employees.handoverBatchNumber,
         nurseBpSystolic: employees.nurseBpSystolic,
         nurseBpDiastolic: employees.nurseBpDiastolic,
         nursePulseBpm: employees.nursePulseBpm,
@@ -163,6 +179,11 @@ export async function getStationEmployeesWithStatus(
         nurseVisionNearRight: employees.nurseVisionNearRight,
         nurseVisionNearLeft: employees.nurseVisionNearLeft,
         nurseColorVision: employees.nurseColorVision,
+        doctorBpSystolic: employees.doctorBpSystolic,
+        doctorBpDiastolic: employees.doctorBpDiastolic,
+        doctorPulseBpm: employees.doctorPulseBpm,
+        doctorSpo2: employees.doctorSpo2,
+        doctorVitalsRewritten: employees.doctorVitalsRewritten,
         checklistId: stationChecklist.id,
         arrivalStatus: stationChecklist.arrivalStatus,
         isLocked: stationChecklist.isLocked,
@@ -181,12 +202,21 @@ export async function getStationEmployeesWithStatus(
       .where(and(eq(employees.campId, campId), eq(employees.checkInStatus, "CHECKED_IN")))
       .orderBy(employees.fullName);
 
-    return rows.map((r) => ({
-      ...r,
-      agencyName: r.agencyName || "Direct Payroll",
-      arrivalStatus: r.arrivalStatus || "PENDING",
-      isLocked: Boolean(r.isLocked),
-    }));
+    // Deduplicate by employee id
+    const seen = new Set<string>();
+    const uniqueRows = [];
+    for (const r of rows) {
+      if (!seen.has(r.id)) {
+        seen.add(r.id);
+        uniqueRows.push({
+          ...r,
+          agencyName: r.agencyName || "Direct Payroll",
+          arrivalStatus: r.arrivalStatus || "PENDING",
+          isLocked: Boolean(r.isLocked),
+        });
+      }
+    }
+    return uniqueRows;
   } catch (err: any) {
     console.error("getStationEmployeesWithStatus error:", err);
     return [];
@@ -201,10 +231,7 @@ export async function markEmployeeArrivedAtStation(params: {
   try {
     await db
       .update(stationChecklist)
-      .set({
-        arrivalStatus: "ARRIVED",
-        arrivedAt: new Date(),
-      })
+      .set({ arrivalStatus: "ARRIVED", arrivedAt: new Date() })
       .where(
         and(
           eq(stationChecklist.employeeId, params.employeeId),
@@ -223,7 +250,6 @@ export async function markEmployeeArrivedAtStation(params: {
   }
 }
 
-// 1-Tap Toggle: Mark As Arrived <-> Arrived
 export async function toggleEmployeeArrivalAtStation(params: {
   employeeId: string;
   campId: string;
@@ -256,9 +282,7 @@ export async function toggleEmployeeArrivalAtStation(params: {
     }
 
     const current = existing[0].arrivalStatus;
-    if (current === "COMPLETED") {
-      return { success: true, arrivalStatus: "COMPLETED" as const };
-    }
+    if (current === "COMPLETED") return { success: true, arrivalStatus: "COMPLETED" as const };
 
     const nextStatus = current === "ARRIVED" ? "PENDING" : "ARRIVED";
     await db
@@ -280,7 +304,7 @@ export async function toggleEmployeeArrivalAtStation(params: {
 }
 
 // =========================================================================
-// 3. NURSING STATION: BP, PULSE, SPO2, AND VISION SCREENING (WITH EDIT LOCK)
+// 3. NURSING STATION (MANDATORY ARRIVED + EDIT LOCK)
 // =========================================================================
 
 export async function submitNurseVitals(params: {
@@ -298,9 +322,8 @@ export async function submitNurseVitals(params: {
   nurseName?: string;
 }) {
   try {
-    // Check post-save edit lock
     const existing = await db
-      .select({ isLocked: stationChecklist.isLocked })
+      .select({ isLocked: stationChecklist.isLocked, arrivalStatus: stationChecklist.arrivalStatus })
       .from(stationChecklist)
       .where(
         and(
@@ -316,6 +339,13 @@ export async function submitNurseVitals(params: {
         success: false,
         isLocked: true,
         error: "Entry is LOCKED. Request Camp Coordinator permission to rewrite.",
+      };
+    }
+
+    if (existing[0]?.arrivalStatus !== "ARRIVED") {
+      return {
+        success: false,
+        error: "Please click 'Mark As Arrived' first before saving Nurse vitals.",
       };
     }
 
@@ -359,8 +389,33 @@ export async function submitNurseVitals(params: {
 }
 
 // =========================================================================
-// 4. PHLEBOTOMY: 1-BARCODE LOCK, SPECIAL TUBE, DEFERRED URINE & HANDOVER
+// 4. PHLEBOTOMY: INSTANT DUPLICATE CHECK + MULTI-BATCH HANDOVER
 // =========================================================================
+
+export async function checkBarcodeAvailability(params: {
+  barcode: string;
+  employeeId: string;
+}) {
+  try {
+    const clean = params.barcode.trim().toUpperCase();
+    if (!clean) return { available: true };
+    const existing = await db
+      .select({ id: employees.id, fullName: employees.fullName, uhid: employees.uhid })
+      .from(employees)
+      .where(eq(employees.labKitBarcode, clean))
+      .limit(1);
+
+    if (existing.length > 0 && existing[0].id !== params.employeeId) {
+      return {
+        available: false,
+        error: `DUPLICATE BARCODE: "${clean}" is already assigned to ${existing[0].fullName} (${existing[0].uhid}).`,
+      };
+    }
+    return { available: true };
+  } catch {
+    return { available: true };
+  }
+}
 
 export async function submitPhlebotomyCollection(params: {
   employeeId: string;
@@ -372,9 +427,27 @@ export async function submitPhlebotomyCollection(params: {
   phlebotomistName?: string;
 }) {
   try {
+    const chkRows = await db
+      .select({ arrivalStatus: stationChecklist.arrivalStatus })
+      .from(stationChecklist)
+      .where(
+        and(
+          eq(stationChecklist.employeeId, params.employeeId),
+          eq(stationChecklist.campId, params.campId),
+          eq(stationChecklist.station, "PHLEBOTOMY")
+        )
+      )
+      .limit(1);
+
+    if (chkRows.length > 0 && chkRows[0].arrivalStatus === "PENDING") {
+      return {
+        success: false,
+        error: "Please click 'Mark As Arrived' first before saving sample collection.",
+      };
+    }
+
     const cleanBarcode = params.scannedBarcode.trim().toUpperCase();
 
-    // Fetch target employee to verify barcode lock & special container requirement
     const empRows = await db
       .select({
         id: employees.id,
@@ -387,21 +460,16 @@ export async function submitPhlebotomyCollection(params: {
       .where(eq(employees.id, params.employeeId))
       .limit(1);
 
-    if (empRows.length === 0) {
-      return { success: false, error: "Employee not found." };
-    }
-
+    if (empRows.length === 0) return { success: false, error: "Employee not found." };
     const emp = empRows[0];
 
-    // Strict 1-Barcode-to-1-Employee Lock
     if (emp.barcodeLocked && emp.labKitBarcode && emp.labKitBarcode !== cleanBarcode) {
       return {
         success: false,
-        error: `BARCODE LOCKED: ${emp.fullName} is already locked to "${emp.labKitBarcode}". You cannot overwrite it without Camp Coordinator permission.`,
+        error: `BARCODE LOCKED: ${emp.fullName} is locked to "${emp.labKitBarcode}". Request Camp Coordinator unlock to change.`,
       };
     }
 
-    // Check if barcode is already bound to a DIFFERENT employee
     const existing = await db
       .select({ id: employees.id, fullName: employees.fullName, uhid: employees.uhid })
       .from(employees)
@@ -412,16 +480,15 @@ export async function submitPhlebotomyCollection(params: {
       return {
         success: false,
         isDuplicate: true,
-        error: `DUPLICATE BARCODE BLOCKED: Barcode "${cleanBarcode}" was already assigned to ${existing[0].fullName} (${existing[0].uhid}). Use a new lab kit!`,
+        error: `DUPLICATE BARCODE BLOCKED: "${cleanBarcode}" was already assigned to ${existing[0].fullName} (${existing[0].uhid}).`,
       };
     }
 
     const specialCollected = Boolean(params.specialContainerCollected);
-
     if (!params.bloodCollected && !params.urineCollected && !specialCollected) {
       return {
         success: false,
-        error: "Sample not collected: Mark at least Blood, Urine, or Special Container.",
+        error: "Mark at least Blood, Urine, or Special Container as collected.",
       };
     }
 
@@ -464,7 +531,6 @@ export async function submitPhlebotomyCollection(params: {
   }
 }
 
-// Scan-to-Verify Deferred Urine or Lab Handover Lookup
 export async function lookupAndVerifySampleByBarcode(params: {
   campId: string;
   scannedBarcode: string;
@@ -486,6 +552,8 @@ export async function lookupAndVerifySampleByBarcode(params: {
         specialContainerName: employees.specialContainerName,
         specialContainerCollected: employees.specialContainerCollected,
         handoverVerified: employees.handoverVerified,
+        handoverBatchNumber: employees.handoverBatchNumber,
+        handoverRiderName: employees.handoverRiderName,
       })
       .from(employees)
       .leftJoin(agencies, eq(employees.agencyId, agencies.id))
@@ -495,7 +563,7 @@ export async function lookupAndVerifySampleByBarcode(params: {
     if (rows.length === 0) {
       return {
         success: false,
-        error: `No employee found in this camp with barcode "${cleanBarcode}".`,
+        error: `No employee found in this selected camp with barcode "${cleanBarcode}".`,
       };
     }
 
@@ -542,11 +610,12 @@ export async function lookupAndVerifySampleByBarcode(params: {
   }
 }
 
-// Camp -> Rider -> Lab Handover Batch Confirmation
 export async function submitPhlebotomyHandover(params: {
   campId: string;
   phleboName: string;
   riderName: string;
+  phleboAcknowledged: boolean;
+  riderAcknowledged: boolean;
   handoverType?: "CAMP_TO_RIDER" | "RIDER_TO_LAB";
   verifiedEmployeeIds: string[];
   notes?: string;
@@ -555,15 +624,29 @@ export async function submitPhlebotomyHandover(params: {
     if (params.verifiedEmployeeIds.length === 0) {
       return { success: false, error: "Scan at least one sample barcode before confirming handover." };
     }
+    if (!params.phleboAcknowledged || !params.riderAcknowledged) {
+      return { success: false, error: "Both Phlebotomist and Rider must acknowledge the handover." };
+    }
 
+    const prevBatches = await db
+      .select({ batchNumber: phlebotomyHandovers.batchNumber })
+      .from(phlebotomyHandovers)
+      .where(eq(phlebotomyHandovers.campId, params.campId))
+      .orderBy(desc(phlebotomyHandovers.batchNumber))
+      .limit(1);
+
+    const nextBatchNumber = (prevBatches[0]?.batchNumber || 0) + 1;
     const handoverId = `hnd_${nanoid(10)}`;
     const now = new Date();
 
     await db.insert(phlebotomyHandovers).values({
       id: handoverId,
       campId: params.campId,
+      batchNumber: nextBatchNumber,
       phleboName: params.phleboName.trim(),
       riderName: params.riderName.trim(),
+      phleboAcknowledged: params.phleboAcknowledged,
+      riderAcknowledged: params.riderAcknowledged,
       handoverType: params.handoverType || "CAMP_TO_RIDER",
       totalVerifiedCount: params.verifiedEmployeeIds.length,
       verifiedEmployeeIds: params.verifiedEmployeeIds,
@@ -576,6 +659,7 @@ export async function submitPhlebotomyHandover(params: {
         .update(employees)
         .set({
           handoverVerified: true,
+          handoverBatchNumber: nextBatchNumber,
           handoverVerifiedAt: now,
           handoverRiderName: params.riderName.trim(),
           handoverPhleboName: params.phleboName.trim(),
@@ -584,14 +668,14 @@ export async function submitPhlebotomyHandover(params: {
     }
 
     revalidatePath("/phlebotomy");
-    return { success: true, handoverId };
+    return { success: true, handoverId, batchNumber: nextBatchNumber };
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 }
 
 // =========================================================================
-// 5. ON-FIELD DOCTOR: PHYSICAL EXAM & RESTRICTED VITALS REWRITE
+// 5. ON-FIELD DOCTOR (MANDATORY ARRIVED + ENT/ORAL/HEAD-NECK + VITALS REWRITE)
 // =========================================================================
 
 export async function submitFieldDoctorExam(params: {
@@ -618,7 +702,7 @@ export async function submitFieldDoctorExam(params: {
 }) {
   try {
     const existingLock = await db
-      .select({ isLocked: stationChecklist.isLocked })
+      .select({ isLocked: stationChecklist.isLocked, arrivalStatus: stationChecklist.arrivalStatus })
       .from(stationChecklist)
       .where(
         and(
@@ -634,6 +718,13 @@ export async function submitFieldDoctorExam(params: {
         success: false,
         isLocked: true,
         error: "Field Doctor entry is LOCKED. Request Camp Coordinator unlock to edit.",
+      };
+    }
+
+    if (existingLock[0]?.arrivalStatus !== "ARRIVED") {
+      return {
+        success: false,
+        error: "Please click 'Mark As Arrived' first before saving Field Doctor exam.",
       };
     }
 
@@ -712,7 +803,7 @@ export async function submitFieldDoctorExam(params: {
 }
 
 // =========================================================================
-// 6. DIAGNOSTIC STATIONS: MEDIA CAPTURE / FILE UPLOAD
+// 6. DIAGNOSTIC STATIONS
 // =========================================================================
 
 export async function submitDiagnosticStationMedia(params: {
@@ -766,7 +857,7 @@ export async function submitDiagnosticStationMedia(params: {
 }
 
 // =========================================================================
-// 7. OFFICE DOCTOR: FINAL REVIEW & LEGAL SIGN-OFF
+// 7. OFFICE DOCTOR
 // =========================================================================
 
 export async function submitOfficeDoctorReview(params: {
@@ -915,9 +1006,7 @@ export async function getCorrectionRequests(campId?: string) {
       .innerJoin(employees, eq(correctionRequests.employeeId, employees.id))
       .orderBy(desc(correctionRequests.createdAt));
 
-    if (campId) {
-      return await query.where(eq(correctionRequests.campId, campId));
-    }
+    if (campId) return await query.where(eq(correctionRequests.campId, campId));
     return await query;
   } catch (err: any) {
     console.error("getCorrectionRequests error:", err);
@@ -958,10 +1047,7 @@ export async function resolveCorrectionRequest(params: {
         );
 
       if (req.station === "PHLEBOTOMY") {
-        await db
-          .update(employees)
-          .set({ barcodeLocked: false })
-          .where(eq(employees.id, req.employeeId));
+        await db.update(employees).set({ barcodeLocked: false }).where(eq(employees.id, req.employeeId));
       }
     }
 
@@ -995,17 +1081,13 @@ export async function resolveCorrectionRequest(params: {
 }
 
 // =========================================================================
-// 9. PHLEBOTOMY & HANDOVER EXCEL EXPORT ROSTER
+// 9. PHLEBOTOMY & HANDOVER EXCEL EXPORT (CARRIED SAMPLES ONLY + DDMMYYYY, HHMMSS)
 // =========================================================================
 
-export async function getPhlebotomyExportRoster(campId: string) {
+export async function getPhlebotomyExportRoster(campId: string, carriedOnly: boolean = false) {
   try {
     const campRecord = await db
-      .select({
-        campName: camps.name,
-        clientName: clients.name,
-        clientCode: clients.code,
-      })
+      .select({ campName: camps.name, clientName: clients.name })
       .from(camps)
       .innerJoin(clients, eq(camps.clientId, clients.id))
       .where(eq(camps.id, campId))
@@ -1032,6 +1114,7 @@ export async function getPhlebotomyExportRoster(campId: string) {
         specialContainerCollected: employees.specialContainerCollected,
         samplesCollectedAt: employees.samplesCollectedAt,
         handoverVerified: employees.handoverVerified,
+        handoverBatchNumber: employees.handoverBatchNumber,
         handoverRiderName: employees.handoverRiderName,
         handoverPhleboName: employees.handoverPhleboName,
         handoverVerifiedAt: employees.handoverVerifiedAt,
@@ -1041,10 +1124,14 @@ export async function getPhlebotomyExportRoster(campId: string) {
       .where(eq(employees.campId, campId))
       .orderBy(employees.uhid);
 
+    const filteredRows = carriedOnly
+      ? rows.filter((r) => r.bloodCollected || r.urineCollected || r.specialContainerCollected || r.handoverVerified)
+      : rows;
+
     return {
       clientName,
       campName,
-      employees: rows.map((r, index) => {
+      employees: filteredRows.map((r, index) => {
         const parts: string[] = [];
         if (r.bloodCollected) parts.push("Blood");
         if (r.urineCollected) parts.push("Urine");
@@ -1069,15 +1156,11 @@ export async function getPhlebotomyExportRoster(campId: string) {
               ? `Collected (${r.specialContainerName || "Special"})`
               : `Pending (${r.specialContainerName || "Special"})`
             : "N/A",
-          collectedTimestamp: r.samplesCollectedAt
-            ? new Date(r.samplesCollectedAt).toLocaleString()
-            : "Pending",
-          handoverStatus: r.handoverVerified ? "Verified for Lab" : "Not Handed Over",
+          collectedTimestamp: formatDDMMYYYY_HHMMSS(r.samplesCollectedAt),
+          handoverStatus: r.handoverVerified ? `Batch #${r.handoverBatchNumber} Verified` : "Not Handed Over",
           riderName: r.handoverRiderName || "-",
           phleboName: r.handoverPhleboName || "-",
-          handoverTimestamp: r.handoverVerifiedAt
-            ? new Date(r.handoverVerifiedAt).toLocaleString()
-            : "-",
+          handoverTimestamp: formatDDMMYYYY_HHMMSS(r.handoverVerifiedAt),
         };
       }),
     };

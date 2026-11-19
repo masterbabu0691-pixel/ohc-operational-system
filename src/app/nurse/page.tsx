@@ -9,25 +9,9 @@ import {
   submitNurseVitals,
   requestCorrectionUnlock,
 } from "@/actions/clinical-actions";
-import {
-  Search,
-  Building2,
-  Lock,
-  CheckCircle2,
-  Clock,
-  AlertTriangle,
-} from "lucide-react";
+import { Search, Building2, Lock, CheckCircle2, Clock, AlertTriangle } from "lucide-react";
 import { BackButton } from "@/components/shared/BackButton";
-
-const DEFAULTS = {
-  bpSystolic: "120",
-  bpDiastolic: "80",
-  pulseBpm: "72",
-  spo2: "99",
-  visionDistRight: "6/6",
-  visionDistLeft: "6/6",
-  colorVision: "Normal",
-};
+import { StationAttendanceBar } from "@/components/shared/StationAttendanceBar";
 
 export default function NurseStationPage() {
   const [camps, setCamps] = useState<any[]>([]);
@@ -37,20 +21,18 @@ export default function NurseStationPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [queueTab, setQueueTab] = useState<"pending" | "completed">("pending");
 
-  // Nurse Measurements & Dirty Tracking (grey default until modified)
-  const [bpSystolic, setBpSystolic] = useState(DEFAULTS.bpSystolic);
-  const [bpDiastolic, setBpDiastolic] = useState(DEFAULTS.bpDiastolic);
-  const [pulseBpm, setPulseBpm] = useState(DEFAULTS.pulseBpm);
-  const [spo2, setSpo2] = useState(DEFAULTS.spo2);
-  const [visionDistRight, setVisionDistRight] = useState(DEFAULTS.visionDistRight);
-  const [visionDistLeft, setVisionDistLeft] = useState(DEFAULTS.visionDistLeft);
+  // Blank vitals with grey placeholders; Vision & Color Vision stay defaults
+  const [bpSystolic, setBpSystolic] = useState("");
+  const [bpDiastolic, setBpDiastolic] = useState("");
+  const [pulseBpm, setPulseBpm] = useState("");
+  const [spo2, setSpo2] = useState("");
+  const [visionDistRight, setVisionDistRight] = useState("6/6");
+  const [visionDistLeft, setVisionDistLeft] = useState("6/6");
   const [visionNearRight, setVisionNearRight] = useState("N6");
   const [visionNearLeft, setVisionNearLeft] = useState("N6");
-  const [colorVision, setColorVision] = useState(DEFAULTS.colorVision);
-  const [dirtyFields, setDirtyFields] = useState<Record<string, boolean>>({});
+  const [colorVision, setColorVision] = useState("Normal");
   const [isSaving, setIsSaving] = useState(false);
 
-  // Coordinator Unlock Request State
   const [showUnlockModal, setShowUnlockModal] = useState(false);
   const [unlockReason, setUnlockReason] = useState("");
 
@@ -79,16 +61,15 @@ export default function NurseStationPage() {
 
   const handleSelectEmployee = (emp: any) => {
     setSelectedEmp(emp);
-    setBpSystolic(emp.nurseBpSystolic || DEFAULTS.bpSystolic);
-    setBpDiastolic(emp.nurseBpDiastolic || DEFAULTS.bpDiastolic);
-    setPulseBpm(emp.nursePulseBpm || DEFAULTS.pulseBpm);
-    setSpo2(emp.nurseSpo2 || DEFAULTS.spo2);
-    setVisionDistRight(emp.nurseVisionDistanceRight || DEFAULTS.visionDistRight);
-    setVisionDistLeft(emp.nurseVisionDistanceLeft || DEFAULTS.visionDistLeft);
+    setBpSystolic(emp.nurseBpSystolic || "");
+    setBpDiastolic(emp.nurseBpDiastolic || "");
+    setPulseBpm(emp.nursePulseBpm || "");
+    setSpo2(emp.nurseSpo2 || "");
+    setVisionDistRight(emp.nurseVisionDistanceRight || "6/6");
+    setVisionDistLeft(emp.nurseVisionDistanceLeft || "6/6");
     setVisionNearRight(emp.nurseVisionNearRight || "N6");
     setVisionNearLeft(emp.nurseVisionNearLeft || "N6");
-    setColorVision(emp.nurseColorVision || DEFAULTS.colorVision);
-    setDirtyFields({});
+    setColorVision(emp.nurseColorVision || "Normal");
   };
 
   const handleToggleArrived = async () => {
@@ -107,8 +88,13 @@ export default function NurseStationPage() {
   const handleSubmitVitals = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedEmp) return;
-    setIsSaving(true);
 
+    if (selectedEmp.arrivalStatus !== "ARRIVED") {
+      alert("Mandatory Rule: Please click 'Mark As Arrived' first before saving Nurse vitals.");
+      return;
+    }
+
+    setIsSaving(true);
     const res = await submitNurseVitals({
       employeeId: selectedEmp.id,
       campId: selectedCampId,
@@ -122,7 +108,6 @@ export default function NurseStationPage() {
       visionNearLeft,
       colorVision,
     });
-
     setIsSaving(false);
 
     if (res.success) {
@@ -146,8 +131,6 @@ export default function NurseStationPage() {
       alert("Correction request sent to Camp Coordinator Desk.");
       setShowUnlockModal(false);
       setUnlockReason("");
-    } else {
-      alert("Failed to send request: " + res.error);
     }
   };
 
@@ -165,11 +148,6 @@ export default function NurseStationPage() {
 
   const isArrived = selectedEmp?.arrivalStatus === "ARRIVED";
 
-  const fieldTone = (key: string, currentVal: string, defaultVal: string) =>
-    dirtyFields[key] || currentVal !== defaultVal
-      ? "text-[#002642] font-bold"
-      : "text-slate-400 font-medium";
-
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-4 sm:p-6 space-y-5">
       <div className="max-w-6xl mx-auto space-y-5">
@@ -178,41 +156,36 @@ export default function NurseStationPage() {
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-3">
           <div>
             <h1 className="text-2xl font-black text-[#002642]">Nurse Workstation</h1>
-            <p className="text-xs text-slate-500">
-              Measure Blood Pressure, Pulse, SpO2, and Vision screening.
-            </p>
+            <p className="text-xs text-slate-500">Measure Blood Pressure, Pulse, SpO2, and Vision screening.</p>
           </div>
 
-          <select
-            value={selectedCampId}
-            onChange={(e) => setSelectedCampId(e.target.value)}
-            className="px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs font-bold"
-          >
-            {camps.map((c) => (
-              <option key={c.id} value={c.id}>
-                [{c.clientName}] {c.name}
-              </option>
-            ))}
-          </select>
+          <div className="flex flex-wrap items-center gap-2">
+            <StationAttendanceBar campId={selectedCampId} stationName="NURSE" />
+            <select
+              value={selectedCampId}
+              onChange={(e) => setSelectedCampId(e.target.value)}
+              className="px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs font-bold"
+            >
+              {camps.map((c) => (
+                <option key={c.id} value={c.id}>[{c.clientName}] {c.name}</option>
+              ))}
+            </select>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Auto-Settled Waiting & Completed Queue */}
+          {/* Waiting / Completed Queue */}
           <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-3">
             <div className="flex bg-slate-100 p-1 rounded-xl text-xs font-bold">
               <button
                 onClick={() => setQueueTab("pending")}
-                className={`flex-1 py-1.5 rounded-lg transition ${
-                  queueTab === "pending" ? "bg-white text-[#002642] shadow-xs" : "text-slate-500"
-                }`}
+                className={`flex-1 py-1.5 rounded-lg transition ${queueTab === "pending" ? "bg-white text-[#002642] shadow-xs" : "text-slate-500"}`}
               >
                 Waiting ({pendingList.length})
               </button>
               <button
                 onClick={() => setQueueTab("completed")}
-                className={`flex-1 py-1.5 rounded-lg transition ${
-                  queueTab === "completed" ? "bg-white text-emerald-700 shadow-xs" : "text-slate-500"
-                }`}
+                className={`flex-1 py-1.5 rounded-lg transition ${queueTab === "completed" ? "bg-white text-emerald-700 shadow-xs" : "text-slate-500"}`}
               >
                 Completed ({completedList.length})
               </button>
@@ -235,17 +208,13 @@ export default function NurseStationPage() {
                   key={emp.id}
                   onClick={() => handleSelectEmployee(emp)}
                   className={`p-3 rounded-xl border text-xs cursor-pointer transition space-y-1 ${
-                    selectedEmp?.id === emp.id
-                      ? "border-[#008C8C] bg-teal-50/50"
-                      : "border-slate-200 hover:border-slate-300 bg-white"
+                    selectedEmp?.id === emp.id ? "border-[#008C8C] bg-teal-50/50" : "border-slate-200 hover:border-slate-300 bg-white"
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <div className="font-bold text-[#002642] truncate">{emp.fullName}</div>
                     {emp.arrivalStatus === "ARRIVED" && (
-                      <span className="px-1.5 py-0.5 rounded bg-blue-600 text-white text-[9px] font-bold">
-                        Arrived
-                      </span>
+                      <span className="px-1.5 py-0.5 rounded bg-blue-600 text-white text-[9px] font-bold">Arrived</span>
                     )}
                     {emp.arrivalStatus === "COMPLETED" && (
                       <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[9px] font-bold flex items-center space-x-0.5">
@@ -274,16 +243,11 @@ export default function NurseStationPage() {
           <div className="lg:col-span-2 bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
             {selectedEmp ? (
               <form onSubmit={handleSubmitVitals} className="space-y-6">
-                {/* Banner with 1-Tap Arrival Toggle */}
                 <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
                   <div>
                     <div className="font-black text-[#002642] text-sm">{selectedEmp.fullName}</div>
-                    <div className="text-slate-500 font-mono">
-                      UHID: {selectedEmp.uhid} | Code: {selectedEmp.empCode}
-                    </div>
-                    <div className="text-indigo-700 font-bold mt-0.5">
-                      Agency: {selectedEmp.agencyName || "Direct Payroll"}
-                    </div>
+                    <div className="text-slate-500 font-mono">UHID: {selectedEmp.uhid} | Code: {selectedEmp.empCode}</div>
+                    <div className="text-indigo-700 font-bold mt-0.5">Agency: {selectedEmp.agencyName || "Direct Payroll"}</div>
                   </div>
 
                   {selectedEmp.arrivalStatus !== "COMPLETED" && (
@@ -291,9 +255,7 @@ export default function NurseStationPage() {
                       type="button"
                       onClick={handleToggleArrived}
                       className={`px-3.5 py-1.5 text-white text-xs font-bold rounded-lg shadow-xs transition ${
-                        isArrived
-                          ? "bg-blue-600 hover:bg-blue-700"
-                          : "bg-[#002642] hover:bg-[#001e38]"
+                        isArrived ? "bg-blue-600 hover:bg-blue-700" : "bg-[#002642] hover:bg-[#001e38]"
                       }`}
                     >
                       {isArrived ? "Arrived" : "Mark As Arrived"}
@@ -301,24 +263,25 @@ export default function NurseStationPage() {
                   )}
                 </div>
 
-                {/* Locked Banner */}
+                {!isArrived && selectedEmp.arrivalStatus !== "COMPLETED" && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs font-bold text-amber-900 flex items-center space-x-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>Mandatory: Click &quot;Mark As Arrived&quot; above before saving Nurse vitals.</span>
+                  </div>
+                )}
+
                 {selectedEmp.isLocked && (
                   <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between text-xs">
                     <div className="flex items-center space-x-2 text-amber-900 font-bold">
                       <Lock className="w-4 h-4 text-amber-600 shrink-0" />
                       <span>Entry Locked: Cannot rewrite without Camp Coordinator approval.</span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowUnlockModal(true)}
-                      className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold"
-                    >
+                    <button type="button" onClick={() => setShowUnlockModal(true)} className="px-3 py-1 bg-amber-600 text-white rounded-lg font-bold">
                       Request Correction
                     </button>
                   </div>
                 )}
 
-                {/* Read-Only Reception Anthropometry */}
                 <div className="p-3 bg-teal-50 border border-teal-200 rounded-xl text-xs flex items-center justify-between">
                   <span className="font-bold text-teal-900">Reception Height, Weight & BMI:</span>
                   <span className="font-mono font-bold text-teal-800">
@@ -326,99 +289,65 @@ export default function NurseStationPage() {
                   </span>
                 </div>
 
-                {/* Nurse Inputs (Grey default until edited) */}
+                {/* Blank Inputs with Grey Placeholders */}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">BP Systolic</label>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">BP Systolic *</label>
                     <input
                       type="number"
+                      required
                       disabled={selectedEmp.isLocked}
+                      placeholder="120"
                       value={bpSystolic}
-                      onChange={(e) => {
-                        setBpSystolic(e.target.value);
-                        setDirtyFields((d) => ({ ...d, bpSystolic: true }));
-                      }}
-                      className={`w-full px-3 py-2 border border-slate-300 rounded-xl text-sm disabled:bg-slate-100 ${fieldTone(
-                        "bpSystolic",
-                        bpSystolic,
-                        DEFAULTS.bpSystolic
-                      )}`}
+                      onChange={(e) => setBpSystolic(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-bold text-[#002642] placeholder:text-slate-400 placeholder:font-normal disabled:bg-slate-100"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">BP Diastolic</label>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">BP Diastolic *</label>
                     <input
                       type="number"
+                      required
                       disabled={selectedEmp.isLocked}
+                      placeholder="80"
                       value={bpDiastolic}
-                      onChange={(e) => {
-                        setBpDiastolic(e.target.value);
-                        setDirtyFields((d) => ({ ...d, bpDiastolic: true }));
-                      }}
-                      className={`w-full px-3 py-2 border border-slate-300 rounded-xl text-sm disabled:bg-slate-100 ${fieldTone(
-                        "bpDiastolic",
-                        bpDiastolic,
-                        DEFAULTS.bpDiastolic
-                      )}`}
+                      onChange={(e) => setBpDiastolic(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-bold text-[#002642] placeholder:text-slate-400 placeholder:font-normal disabled:bg-slate-100"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">Pulse (bpm)</label>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Pulse (bpm) *</label>
                     <input
                       type="number"
+                      required
                       disabled={selectedEmp.isLocked}
+                      placeholder="72"
                       value={pulseBpm}
-                      onChange={(e) => {
-                        setPulseBpm(e.target.value);
-                        setDirtyFields((d) => ({ ...d, pulseBpm: true }));
-                      }}
-                      className={`w-full px-3 py-2 border border-slate-300 rounded-xl text-sm disabled:bg-slate-100 ${fieldTone(
-                        "pulseBpm",
-                        pulseBpm,
-                        DEFAULTS.pulseBpm
-                      )}`}
+                      onChange={(e) => setPulseBpm(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-bold text-[#002642] placeholder:text-slate-400 placeholder:font-normal disabled:bg-slate-100"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">SpO2 (%)</label>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">SpO2 (%) *</label>
                     <input
                       type="number"
+                      required
                       disabled={selectedEmp.isLocked}
+                      placeholder="99"
                       value={spo2}
-                      onChange={(e) => {
-                        setSpo2(e.target.value);
-                        setDirtyFields((d) => ({ ...d, spo2: true }));
-                      }}
-                      className={`w-full px-3 py-2 border border-slate-300 rounded-xl text-sm disabled:bg-slate-100 ${fieldTone(
-                        "spo2",
-                        spo2,
-                        DEFAULTS.spo2
-                      )}`}
+                      onChange={(e) => setSpo2(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-bold text-[#002642] placeholder:text-slate-400 placeholder:font-normal disabled:bg-slate-100"
                     />
                   </div>
                 </div>
 
-                {/* Vision Screening */}
+                {/* Vision Screening (Defaults Preserved) */}
                 <div className="pt-3 border-t border-slate-100 space-y-3">
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                    Vision Screening
-                  </h4>
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">Vision Screening</h4>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                     <div>
                       <label className="block font-medium mb-1">Dist. Right</label>
-                      <select
-                        disabled={selectedEmp.isLocked}
-                        value={visionDistRight}
-                        onChange={(e) => {
-                          setVisionDistRight(e.target.value);
-                          setDirtyFields((d) => ({ ...d, visionDistRight: true }));
-                        }}
-                        className={`w-full px-3 py-1.5 border border-slate-300 rounded-xl ${fieldTone(
-                          "visionDistRight",
-                          visionDistRight,
-                          DEFAULTS.visionDistRight
-                        )}`}
-                      >
+                      <select disabled={selectedEmp.isLocked} value={visionDistRight} onChange={(e) => setVisionDistRight(e.target.value)} className="w-full px-3 py-1.5 border border-slate-300 rounded-xl font-bold text-[#002642]">
                         <option value="6/6">6/6</option>
                         <option value="6/9">6/9</option>
                         <option value="6/12">6/12</option>
@@ -427,19 +356,7 @@ export default function NurseStationPage() {
                     </div>
                     <div>
                       <label className="block font-medium mb-1">Dist. Left</label>
-                      <select
-                        disabled={selectedEmp.isLocked}
-                        value={visionDistLeft}
-                        onChange={(e) => {
-                          setVisionDistLeft(e.target.value);
-                          setDirtyFields((d) => ({ ...d, visionDistLeft: true }));
-                        }}
-                        className={`w-full px-3 py-1.5 border border-slate-300 rounded-xl ${fieldTone(
-                          "visionDistLeft",
-                          visionDistLeft,
-                          DEFAULTS.visionDistLeft
-                        )}`}
-                      >
+                      <select disabled={selectedEmp.isLocked} value={visionDistLeft} onChange={(e) => setVisionDistLeft(e.target.value)} className="w-full px-3 py-1.5 border border-slate-300 rounded-xl font-bold text-[#002642]">
                         <option value="6/6">6/6</option>
                         <option value="6/9">6/9</option>
                         <option value="6/12">6/12</option>
@@ -448,19 +365,7 @@ export default function NurseStationPage() {
                     </div>
                     <div>
                       <label className="block font-medium mb-1">Color Vision</label>
-                      <select
-                        disabled={selectedEmp.isLocked}
-                        value={colorVision}
-                        onChange={(e) => {
-                          setColorVision(e.target.value);
-                          setDirtyFields((d) => ({ ...d, colorVision: true }));
-                        }}
-                        className={`w-full px-3 py-1.5 border border-slate-300 rounded-xl ${fieldTone(
-                          "colorVision",
-                          colorVision,
-                          DEFAULTS.colorVision
-                        )}`}
-                      >
+                      <select disabled={selectedEmp.isLocked} value={colorVision} onChange={(e) => setColorVision(e.target.value)} className="w-full px-3 py-1.5 border border-slate-300 rounded-xl font-bold text-[#002642]">
                         <option value="Normal">Normal</option>
                         <option value="Red green deficiency">Red green deficiency</option>
                         <option value="Blue-yellow deficiency">Blue-yellow deficiency</option>
@@ -476,11 +381,7 @@ export default function NurseStationPage() {
                     disabled={isSaving || selectedEmp.isLocked}
                     className="px-6 py-2.5 bg-[#008C8C] hover:bg-[#006e6e] text-white rounded-xl text-xs font-bold shadow-md transition disabled:opacity-40"
                   >
-                    {selectedEmp.isLocked
-                      ? "Locked (Coordinator Approval Required)"
-                      : isSaving
-                      ? "Saving Vitals..."
-                      : "Save Vitals & Send to Next"}
+                    {selectedEmp.isLocked ? "Locked" : isSaving ? "Saving Vitals..." : "Save Vitals & Send to Next"}
                   </button>
                 </div>
               </form>
@@ -493,7 +394,6 @@ export default function NurseStationPage() {
         </div>
       </div>
 
-      {/* Coordinator Unlock Request Modal */}
       {showUnlockModal && (
         <div className="fixed inset-0 bg-slate-950/60 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
@@ -501,31 +401,16 @@ export default function NurseStationPage() {
               <AlertTriangle className="w-4 h-4" />
               <span>Request Camp Coordinator Unlock</span>
             </div>
-            <p className="text-xs text-slate-500">
-              Explain why {selectedEmp?.fullName}'s Nurse vitals need to be corrected:
-            </p>
             <textarea
               rows={3}
               value={unlockReason}
               onChange={(e) => setUnlockReason(e.target.value)}
-              placeholder="e.g., Typo in systolic BP (entered 220 instead of 120)"
+              placeholder="Explain why Nurse vitals need correction..."
               className="w-full p-2.5 border border-slate-300 rounded-xl text-xs"
             />
             <div className="flex justify-end space-x-2">
-              <button
-                type="button"
-                onClick={() => setShowUnlockModal(false)}
-                className="px-4 py-2 border border-slate-300 rounded-xl text-xs font-semibold"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleRequestUnlock}
-                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold"
-              >
-                Send Request
-              </button>
+              <button type="button" onClick={() => setShowUnlockModal(false)} className="px-4 py-2 border border-slate-300 rounded-xl text-xs font-semibold">Cancel</button>
+              <button type="button" onClick={handleRequestUnlock} className="px-4 py-2 bg-amber-600 text-white rounded-xl text-xs font-bold">Send Request</button>
             </div>
           </div>
         </div>

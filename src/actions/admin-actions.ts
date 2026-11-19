@@ -2,25 +2,29 @@
 "use server";
 
 import { db } from "@/db";
-import { 
-  services, 
-  camps, 
-  clients, 
-  clientPackages, 
-  agencies, 
-  employees, 
-  stationChecklist, 
+import {
+  services,
+  camps,
+  clients,
+  clientPackages,
+  agencies,
+  employees,
+  stationChecklist,
   diagnosticRecords,
-  doctorReviews, 
-  users, 
-  systemSettings, 
+  doctorReviews,
+  users,
+  staffAttendance,
+  staffDocuments,
+  systemSettings,
   auditLogs,
   stationTypeEnum,
-  roleEnum
+  roleEnum,
 } from "@/db/schema";
-import { eq, sql, and } from "drizzle-orm";
+import { eq, sql, and, desc, isNull } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { revalidatePath } from "next/cache";
+import bcrypt from "bcryptjs";
+import { getSession } from "@/lib/auth";
 
 // 1. Live Operations Dashboard Numbers
 export async function getAdminDashboardStats() {
@@ -92,7 +96,7 @@ export async function getAdminDashboardStats() {
 export async function getAdminServices() {
   try {
     return await db.select().from(services).orderBy(services.name);
-  } catch (err) {
+  } catch {
     return [];
   }
 }
@@ -101,7 +105,7 @@ export async function createOrUpdateService(data: {
   id?: string;
   code: string;
   name: string;
-  station: typeof stationTypeEnum.enumValues[number];
+  station: (typeof stationTypeEnum.enumValues)[number];
   fields: string[];
   isActive?: boolean;
 }) {
@@ -136,7 +140,7 @@ export async function createOrUpdateService(data: {
   }
 }
 
-// 3. User & RBAC Management
+// 3. User & RBAC Management (With Unique Password & Station Scoping)
 export async function getAdminUsers() {
   try {
     return await db
@@ -145,6 +149,7 @@ export async function getAdminUsers() {
         name: users.name,
         email: users.email,
         role: users.role,
+        assignedStation: users.assignedStation,
         isActive: users.isActive,
         assignedClientId: users.assignedClientId,
         clientName: clients.name,
@@ -152,7 +157,7 @@ export async function getAdminUsers() {
       .from(users)
       .leftJoin(clients, eq(users.assignedClientId, clients.id))
       .orderBy(users.createdAt);
-  } catch (err) {
+  } catch {
     return [];
   }
 }
@@ -160,21 +165,39 @@ export async function getAdminUsers() {
 export async function createOrUpdateUser(data: {
   name: string;
   email: string;
-  role: typeof roleEnum.enumValues[number];
+  password?: string;
+  role: (typeof roleEnum.enumValues)[number];
   assignedClientId?: string;
+  assignedStation?: (typeof stationTypeEnum.enumValues)[number] | null;
 }) {
   try {
-    const userId = `usr_${nanoid(8)}`;
+    const cleanEmail = data.email.toLowerCase().trim();
+    const existing = await db
+      .select({ id: users.id, passwordHash: users.passwordHash })
+      .from(users)
+      .where(eq(users.email, cleanEmail))
+      .limit(1);
+
+    let passwordHash = existing[0]?.passwordHash;
+    if (data.password && data.password.trim().length >= 6) {
+      const salt = await bcrypt.genSalt(10);
+      passwordHash = await bcrypt.hash(data.password.trim(), salt);
+    } else if (!passwordHash) {
+      return { success: false, error: "Password (min 6 characters) is required for new staff accounts." };
+    }
+
+    const userId = existing[0]?.id || `usr_${nanoid(8)}`;
 
     await db
       .insert(users)
       .values({
         id: userId,
         name: data.name.trim(),
-        email: data.email.toLowerCase().trim(),
+        email: cleanEmail,
         role: data.role,
-        passwordHash: "$2a$10$abcdefghijklmnopqrstuvwxyz01234567890",
+        passwordHash,
         assignedClientId: data.assignedClientId || null,
+        assignedStation: data.role === "DIAGNOSTIC_TECHNICIAN" ? data.assignedStation || null : null,
         isActive: true,
       })
       .onConflictDoUpdate({
@@ -182,7 +205,9 @@ export async function createOrUpdateUser(data: {
         set: {
           name: data.name.trim(),
           role: data.role,
+          passwordHash,
           assignedClientId: data.assignedClientId || null,
+          assignedStation: data.role === "DIAGNOSTIC_TECHNICIAN" ? data.assignedStation || null : null,
         },
       });
 
@@ -193,12 +218,230 @@ export async function createOrUpdateUser(data: {
   }
 }
 
-// 4. System Settings (Branding & Print Layout)
+// 3B. Staff Onboarding Documentation
+export async function uploadStaffDocument(params: {
+  userId: string;
+  docType: string;
+  fileName: string;
+  fileUrl: string;
+}) {
+  try {
+    await db.insert(staffDocuments).values({
+      id: `sdoc_${nanoid(10)}`,
+      userId: params.userId,
+      docType: params.docType,
+      fileName: params.fileName,
+      fileUrl: params.fileUrl,
+    });
+    revalidatePath("/admin/users");
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function getStaffDocuments(userId?: string) {
+  try {
+    const q = db
+      .select({
+        id: staffDocuments.id,
+        userId: staffDocuments.userId,
+        userName: users.name,
+        docType: staffDocuments.docType,
+        fileName: staffDocuments.fileName,
+        fileUrl: staffDocuments.fileUrl,
+        uploadedAt: staffDocuments.uploadedAt,
+      })
+      .from(staffDocuments)
+      .innerJoin(users, eq(staffDocuments.userId, users.id))
+      .orderBy(desc(staffDocuments.uploadedAt));
+
+    if (userId) return await q.where(eq(staffDocuments.userId, userId));
+    return await q;
+  } catch {
+    return [];
+  }
+}
+
+// 3C. Camp Staff Attendance & Station Login/Logout
+export async function staffClockIn(params: { campId: string; station?: string }) {
+  try {
+    const session = await getSession();
+    if (!session) return { success: false, error: "Not authenticated." };
+
+    const openShift = await db
+      .select({ id: staffAttendance.id })
+      .from(staffAttendance)
+      .where(
+        and(
+          eq(staffAttendance.campId, params.campId),
+          eq(staffAttendance.userId, session.userId),
+          isNull(staffAttendance.checkOutTime)
+        )
+      )
+      .limit(1);
+
+    if (openShift.length > 0) {
+      return { success: true, alreadyClockedIn: true };
+    }
+
+    await db.insert(staffAttendance).values({
+      id: `att_${nanoid(10)}`,
+      campId: params.campId,
+      userId: session.userId,
+      userName: session.name,
+      userRole: session.role,
+      station: params.station || session.role,
+      checkInTime: new Date(),
+      approvalStatus: "PENDING",
+    });
+
+    await db.insert(auditLogs).values({
+      userId: session.userId,
+      userRole: session.role,
+      action: "STATION_STAFF_LOGIN",
+      entityType: "CAMP",
+      entityId: params.campId,
+      newState: { station: params.station },
+    });
+
+    revalidatePath("/admin/users");
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function staffClockOut(params: { campId: string }) {
+  try {
+    const session = await getSession();
+    if (!session) return { success: false, error: "Not authenticated." };
+
+    await db
+      .update(staffAttendance)
+      .set({ checkOutTime: new Date() })
+      .where(
+        and(
+          eq(staffAttendance.campId, params.campId),
+          eq(staffAttendance.userId, session.userId),
+          isNull(staffAttendance.checkOutTime)
+        )
+      );
+
+    await db.insert(auditLogs).values({
+      userId: session.userId,
+      userRole: session.role,
+      action: "STATION_STAFF_LOGOUT",
+      entityType: "CAMP",
+      entityId: params.campId,
+    });
+
+    revalidatePath("/admin/users");
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function getCampStaffAttendance(campId?: string) {
+  try {
+    const q = db
+      .select({
+        id: staffAttendance.id,
+        campId: staffAttendance.campId,
+        campName: camps.name,
+        userId: staffAttendance.userId,
+        userName: staffAttendance.userName,
+        userRole: staffAttendance.userRole,
+        station: staffAttendance.station,
+        checkInTime: staffAttendance.checkInTime,
+        checkOutTime: staffAttendance.checkOutTime,
+        approvalStatus: staffAttendance.approvalStatus,
+        approvedBy: staffAttendance.approvedBy,
+        notes: staffAttendance.notes,
+      })
+      .from(staffAttendance)
+      .innerJoin(camps, eq(staffAttendance.campId, camps.id))
+      .orderBy(desc(staffAttendance.checkInTime));
+
+    if (campId) return await q.where(eq(staffAttendance.campId, campId));
+    return await q;
+  } catch {
+    return [];
+  }
+}
+
+export async function approveStaffAttendance(params: {
+  attendanceId: string;
+  status: "APPROVED" | "REJECTED";
+  notes?: string;
+}) {
+  try {
+    const session = await getSession();
+    if (!session || !["SUPER_ADMIN", "CAMP_COORDINATOR"].includes(session.role)) {
+      return { success: false, error: "Only Camp Coordinator or Super Admin can approve attendance." };
+    }
+
+    await db
+      .update(staffAttendance)
+      .set({
+        approvalStatus: params.status,
+        approvedBy: session.name,
+        approvedAt: new Date(),
+        notes: params.notes?.trim() || null,
+      })
+      .where(eq(staffAttendance.id, params.attendanceId));
+
+    revalidatePath("/admin/users");
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+// 3D. Comprehensive Filtered Audit Logs (Individual Staff / Client / Employee)
+export async function getFilteredAuditLogs(params: {
+  filterType: "ALL" | "STAFF" | "CLIENT" | "EMPLOYEE";
+  query?: string;
+}) {
+  try {
+    const rows = await db
+      .select()
+      .from(auditLogs)
+      .orderBy(desc(auditLogs.timestamp))
+      .limit(150);
+
+    const q = (params.query || "").trim().toLowerCase();
+    return rows.filter((r) => {
+      if (params.filterType === "STAFF" && q) {
+        return r.userId.toLowerCase().includes(q) || r.userRole.toLowerCase().includes(q);
+      }
+      if (params.filterType === "CLIENT" && q) {
+        return r.entityType === "CAMP" || r.entityId.toLowerCase().includes(q);
+      }
+      if (params.filterType === "EMPLOYEE" && q) {
+        return r.entityId.toLowerCase().includes(q);
+      }
+      if (q) {
+        return (
+          r.action.toLowerCase().includes(q) ||
+          r.entityId.toLowerCase().includes(q) ||
+          r.userId.toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  } catch {
+    return [];
+  }
+}
+
+// 4. System Settings
 export async function getSystemSetting(key: string) {
   try {
     const res = await db.select().from(systemSettings).where(eq(systemSettings.key, key)).limit(1);
     return res[0]?.value || null;
-  } catch (err) {
+  } catch {
     return null;
   }
 }
@@ -207,17 +450,10 @@ export async function saveSystemSetting(key: string, value: Record<string, any>)
   try {
     await db
       .insert(systemSettings)
-      .values({
-        key,
-        value,
-        updatedAt: new Date(),
-      })
+      .values({ key, value, updatedAt: new Date() })
       .onConflictDoUpdate({
         target: systemSettings.key,
-        set: {
-          value,
-          updatedAt: new Date(),
-        },
+        set: { value, updatedAt: new Date() },
       });
 
     revalidatePath("/admin/settings");
@@ -227,7 +463,7 @@ export async function saveSystemSetting(key: string, value: Record<string, any>)
   }
 }
 
-// 5. Vyora Roster Query WITH Agency Name Joined
+// 5. Vyora Roster Query
 export async function getAdminCampRoster(campId: string = "all") {
   try {
     const campList = await db
@@ -240,7 +476,6 @@ export async function getAdminCampRoster(campId: string = "all") {
       .from(camps)
       .innerJoin(clients, eq(camps.clientId, clients.id));
 
-    // Left join agencies to fetch actual agencyName
     const baseQuery = db
       .select({
         id: employees.id,
@@ -278,15 +513,10 @@ export async function getAdminCampRoster(campId: string = "all") {
       const doctorFitness = reviewMap.get(emp.id) || null;
 
       let pipelineStatus: "REGISTERED" | "PHLEB_DONE" | "DOC_DONE" | "LAB_DONE" | "COMPLETED" = "REGISTERED";
-      if (doctorFitness) {
-        pipelineStatus = "COMPLETED";
-      } else if (empStations["DOCTOR_EXAMINATION"] === "COMPLETED") {
-        pipelineStatus = "DOC_DONE";
-      } else if (empStations["PATHOLOGY_LAB"] === "COMPLETED") {
-        pipelineStatus = "LAB_DONE";
-      } else if (empStations["PHLEBOTOMY"] === "COMPLETED") {
-        pipelineStatus = "PHLEB_DONE";
-      }
+      if (doctorFitness) pipelineStatus = "COMPLETED";
+      else if (empStations["DOCTOR_EXAMINATION"] === "COMPLETED") pipelineStatus = "DOC_DONE";
+      else if (empStations["PATHOLOGY_LAB"] === "COMPLETED") pipelineStatus = "LAB_DONE";
+      else if (empStations["PHLEBOTOMY"] === "COMPLETED") pipelineStatus = "PHLEB_DONE";
 
       const getDotStatus = (stnKey: string) => {
         const val = empStations[stnKey];
@@ -313,48 +543,34 @@ export async function getAdminCampRoster(campId: string = "all") {
       };
     });
 
-    return {
-      camps: campList,
-      employees: formattedEmployees,
-    };
+    return { camps: campList, employees: formattedEmployees };
   } catch (err: any) {
     console.error("Error fetching roster:", err);
     return { camps: [], employees: [] };
   }
 }
 
-// 6. Vyora Camp Monitor Metrics (Clean & Scoped)
+// 6. Vyora Camp Monitor Metrics
 export async function getCampMonitorMetrics(
   selectedClientId: string = "all",
   selectedCampId: string = "all"
 ) {
   try {
     const allClients = await db
-      .select({
-        id: clients.id,
-        name: clients.name,
-        code: clients.code,
-      })
+      .select({ id: clients.id, name: clients.name, code: clients.code })
       .from(clients)
       .where(eq(clients.isActive, true));
 
     const allCamps = await db
-      .select({
-        id: camps.id,
-        name: camps.name,
-        clientId: camps.clientId,
-        packageId: camps.packageId,
-      })
+      .select({ id: camps.id, name: camps.name, clientId: camps.clientId, packageId: camps.packageId })
       .from(camps);
 
     let targetClientId: string | null = selectedClientId !== "all" ? selectedClientId : null;
-    let targetCampId: string | null = selectedCampId !== "all" ? selectedCampId : null;
+    const targetCampId: string | null = selectedCampId !== "all" ? selectedCampId : null;
 
     if (targetCampId) {
       const matchedCamp = allCamps.find((c) => c.id === targetCampId);
-      if (matchedCamp) {
-        targetClientId = matchedCamp.clientId;
-      }
+      if (matchedCamp) targetClientId = matchedCamp.clientId;
     }
 
     let activeServiceCodes: string[] = [];
@@ -389,32 +605,17 @@ export async function getCampMonitorMetrics(
     let allEmps = [];
     if (targetCampId) {
       allEmps = await db
-        .select({
-          id: employees.id,
-          clientId: employees.clientId,
-          campId: employees.campId,
-          checkInStatus: employees.checkInStatus,
-        })
+        .select({ id: employees.id, clientId: employees.clientId, campId: employees.campId, checkInStatus: employees.checkInStatus })
         .from(employees)
         .where(eq(employees.campId, targetCampId));
     } else if (targetClientId) {
       allEmps = await db
-        .select({
-          id: employees.id,
-          clientId: employees.clientId,
-          campId: employees.campId,
-          checkInStatus: employees.checkInStatus,
-        })
+        .select({ id: employees.id, clientId: employees.clientId, campId: employees.campId, checkInStatus: employees.checkInStatus })
         .from(employees)
         .where(eq(employees.clientId, targetClientId));
     } else {
       allEmps = await db
-        .select({
-          id: employees.id,
-          clientId: employees.clientId,
-          campId: employees.campId,
-          checkInStatus: employees.checkInStatus,
-        })
+        .select({ id: employees.id, clientId: employees.clientId, campId: employees.campId, checkInStatus: employees.checkInStatus })
         .from(employees);
     }
 
@@ -424,14 +625,10 @@ export async function getCampMonitorMetrics(
     const employeeIds = allEmps.map((e) => e.id);
 
     const allDiagnostics = await db.select().from(diagnosticRecords);
-    const scopedDiagnostics = allDiagnostics.filter((d) =>
-      employeeIds.includes(d.employeeId)
-    );
+    const scopedDiagnostics = allDiagnostics.filter((d) => employeeIds.includes(d.employeeId));
 
     const allReviews = await db.select().from(doctorReviews);
-    const scopedReviews = allReviews.filter((r) =>
-      employeeIds.includes(r.employeeId)
-    );
+    const scopedReviews = allReviews.filter((r) => employeeIds.includes(r.employeeId));
 
     const completed = scopedReviews.filter((r) => r.isSigned).length;
     const finalReview = scopedReviews.filter((r) => !r.isSigned).length;
@@ -460,12 +657,7 @@ export async function getCampMonitorMetrics(
       const arrived = Math.max(0, checkedIn - done);
       const pending = preRegistered;
 
-      return {
-        isContracted: true,
-        pending,
-        arrived,
-        done,
-      };
+      return { isContracted: true, pending, arrived, done };
     };
 
     return {

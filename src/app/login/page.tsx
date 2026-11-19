@@ -22,9 +22,15 @@ export default function LoginPage() {
 
     if (res.success) {
       if (res.role === "SUPER_ADMIN") window.location.href = "/admin";
-      else if (res.role === "DOCTOR_EXAMINER") window.location.href = "/doctor";
+      else if (res.role === "CAMP_COORDINATOR") window.location.href = "/coordinator";
       else if (res.role === "RECEPTIONIST") window.location.href = "/reception";
-      else if (res.role === "MRD_OFFICER") window.location.href = "/mrd";
+      else if (res.role === "NURSE") window.location.href = "/nurse";
+      else if (res.role === "PHLEBOTOMIST") window.location.href = "/phlebotomy";
+      else if (res.role === "LAB_TECHNICIAN") window.location.href = "/lab";
+      else if (res.role === "FIELD_DOCTOR") window.location.href = "/doctor/field";
+      else if (res.role === "OFFICE_DOCTOR") window.location.href = "/doctor/office";
+      else if (res.role === "DOCTOR_EXAMINER") window.location.href = "/doctor";
+      else if (res.role === "MRD_OFFICER" || res.role === "CLIENT_HR") window.location.href = "/mrd";
       else window.location.href = "/diagnostics";
     } else {
       setErrorMsg(res.error || "Login failed");
@@ -34,28 +40,17 @@ export default function LoginPage() {
     }
   };
 
-  const selectAccount = (fillEmail: string) => {
-    setEmail(fillEmail);
-    setPassword("Admin@123");
-    setErrorMsg("");
-    if (fillEmail !== lockedEmail) {
-      setLockedEmail(null);
-    }
-  };
-
   return (
     <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
       <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl space-y-6">
-        {/* Header */}
         <div className="text-center space-y-2">
           <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center mx-auto text-white shadow-lg shadow-indigo-500/30">
             <ShieldCheck className="w-6 h-6" />
           </div>
           <h1 className="text-xl font-bold text-white tracking-tight">OHC Secure Workstation Login</h1>
-          <p className="text-xs text-slate-400">Occupational Health Checkup Operations System</p>
+          <p className="text-xs text-slate-400">Vyora Occupational Health Camp Operations System</p>
         </div>
 
-        {/* Lockout or Error Banner */}
         {errorMsg && (
           <div
             className={`p-3.5 rounded-xl border text-xs flex items-start space-x-2.5 ${
@@ -69,7 +64,6 @@ export default function LoginPage() {
           </div>
         )}
 
-        {/* Form */}
         <form onSubmit={handleLogin} className="space-y-4">
           <div>
             <label className="block text-xs font-medium text-slate-300 mb-1">Workstation Email Address</label>
@@ -78,7 +72,7 @@ export default function LoginPage() {
               <input
                 type="email"
                 required
-                placeholder="doctor@ohc.com"
+                placeholder="staff@vyorahealthcare.com"
                 value={email}
                 onChange={(e) => {
                   setEmail(e.target.value);
@@ -117,35 +111,8 @@ export default function LoginPage() {
           </button>
         </form>
 
-        {/* Quick Credentials (Public unlock button removed) */}
-        <div className="pt-4 border-t border-slate-800/80 space-y-3">
-          <div className="text-[11px] text-slate-400 font-medium">
-            Demo Accounts (Default Password: <code className="text-indigo-400 font-mono">Admin@123</code>):
-          </div>
-
-          <div className="grid grid-cols-3 gap-2">
-            <button
-              type="button"
-              onClick={() => selectAccount("admin@ohc.com")}
-              className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-[10px] font-mono text-center border border-slate-700 hover:border-indigo-500 transition"
-            >
-              Super Admin
-            </button>
-            <button
-              type="button"
-              onClick={() => selectAccount("doctor@ohc.com")}
-              className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-[10px] font-mono text-center border border-slate-700 hover:border-indigo-500 transition"
-            >
-              Doctor
-            </button>
-            <button
-              type="button"
-              onClick={() => selectAccount("reception@ohc.com")}
-              className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-[10px] font-mono text-center border border-slate-700 hover:border-indigo-500 transition"
-            >
-              Receptionist
-            </button>
-          </div>
+        <div className="pt-3 border-t border-slate-800/80 text-center text-[11px] text-slate-500">
+          Authorized staff only. Contact Super Admin for account access or password resets.
         </div>
       </div>
     </div>
