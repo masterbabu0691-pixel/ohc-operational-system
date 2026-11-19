@@ -320,6 +320,8 @@ export const phlebotomyHandovers = pgTable("phlebotomy_handovers", {
   batchNumber: integer("batch_number").default(1).notNull(),
   phleboName: text("phlebo_name").notNull(),
   riderName: text("rider_name").notNull(),
+  phleboAcknowledged: boolean("phlebo_acknowledged").default(false).notNull(),
+  riderAcknowledged: boolean("rider_acknowledged").default(false).notNull(),
   handoverType: text("handover_type").default("CAMP_TO_RIDER").notNull(),
   totalVerifiedCount: integer("total_verified_count").default(0).notNull(),
   verifiedEmployeeIds: jsonb("verified_employee_ids").$type<string[]>().default([]).notNull(),
