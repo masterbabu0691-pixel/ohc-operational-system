@@ -74,6 +74,9 @@ export const clients = pgTable("clients", {
   address: text("address"),
   totalStrength: text("total_strength"),
   campMonth: text("camp_month"),
+  additionalContacts: jsonb("additional_contacts")
+    .$type<Array<{ name: string; designation?: string; department?: string; email?: string; phone?: string }>>()
+    .default([]),
   isActive: boolean("is_active").default(true).notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -164,6 +167,7 @@ export const employees = pgTable(
     handoverVerifiedAt: timestamp("handover_verified_at"),
     handoverRiderName: text("handover_rider_name"),
     handoverPhleboName: text("handover_phlebo_name"),
+    handoverBatchNumber: integer("handover_batch_number").default(0),
 
     // Reception Vitals (Locked to Reception)
     heightCm: text("height_cm"),
@@ -197,22 +201,31 @@ export const employees = pgTable(
   (table) => ({
     clientEmpIdx: uniqueIndex("client_emp_idx").on(table.clientId, table.empCode),
     uhidIdx: index("uhid_idx").on(table.uhid),
+    campCheckInIdx: index("camp_checkin_idx").on(table.campId, table.checkInStatus),
+    labKitIdx: index("lab_kit_idx").on(table.labKitBarcode),
   })
 );
 
 // 6. Station Checklist: With "Mark as Arrived" State & Post-Save Edit Lock
-export const stationChecklist = pgTable("station_checklist", {
-  id: text("id").primaryKey(),
-  employeeId: text("employee_id").references(() => employees.id).notNull(),
-  campId: text("camp_id").references(() => camps.id).notNull(),
-  station: stationTypeEnum("station").notNull(),
-  status: text("status").default("PENDING").notNull(),
-  arrivalStatus: stationArrivalStatusEnum("arrival_status").default("PENDING").notNull(),
-  isLocked: boolean("is_locked").default(false).notNull(),
-  arrivedAt: timestamp("arrived_at"),
-  completedAt: timestamp("completed_at"),
-  completedBy: text("completed_by"),
-});
+export const stationChecklist = pgTable(
+  "station_checklist",
+  {
+    id: text("id").primaryKey(),
+    employeeId: text("employee_id").references(() => employees.id).notNull(),
+    campId: text("camp_id").references(() => camps.id).notNull(),
+    station: stationTypeEnum("station").notNull(),
+    status: text("status").default("PENDING").notNull(),
+    arrivalStatus: stationArrivalStatusEnum("arrival_status").default("PENDING").notNull(),
+    isLocked: boolean("is_locked").default(false).notNull(),
+    arrivedAt: timestamp("arrived_at"),
+    completedAt: timestamp("completed_at"),
+    completedBy: text("completed_by"),
+  },
+  (table) => ({
+    campStationIdx: index("camp_station_idx").on(table.campId, table.station),
+    empStationIdx: index("emp_station_idx").on(table.employeeId, table.station),
+  })
+);
 
 // 7. Diagnostic Records (Media captures, file uploads, reports)
 export const diagnosticRecords = pgTable("diagnostic_records", {
@@ -225,6 +238,8 @@ export const diagnosticRecords = pgTable("diagnostic_records", {
   structuredData: jsonb("structured_data").notNull(),
   findingsSummary: text("findings_summary"),
   isAbnormal: boolean("is_abnormal").default(false).notNull(),
+  identityMismatch: boolean("identity_mismatch").default(false).notNull(),
+  identityMismatchNote: text("identity_mismatch_note"),
   attachmentUrls: jsonb("attachment_urls").$type<string[]>().default([]).notNull(),
   capturedAfterCamp: boolean("captured_after_camp").default(false).notNull(),
   extractedViaOcr: boolean("extracted_via_ocr").default(false).notNull(),
@@ -302,6 +317,7 @@ export const mrdDossiers = pgTable("mrd_dossiers", {
 export const phlebotomyHandovers = pgTable("phlebotomy_handovers", {
   id: text("id").primaryKey(),
   campId: text("camp_id").references(() => camps.id).notNull(),
+  batchNumber: integer("batch_number").default(1).notNull(),
   phleboName: text("phlebo_name").notNull(),
   riderName: text("rider_name").notNull(),
   handoverType: text("handover_type").default("CAMP_TO_RIDER").notNull(),
@@ -342,7 +358,42 @@ export const users = pgTable("users", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
-// 14. System Settings & Audit Logs
+// 13B. Staff Onboarding Documentation (KYC / Certificates)
+export const staffDocuments = pgTable("staff_documents", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").references(() => users.id).notNull(),
+  docType: text("doc_type").notNull(),
+  fileName: text("file_name").notNull(),
+  fileUrl: text("file_url").notNull(),
+  uploadedAt: timestamp("uploaded_at").defaultNow().notNull(),
+});
+
+// 13C. Staff Camp Attendance & Station Check-In/Out
+export const staffAttendance = pgTable("staff_attendance", {
+  id: text("id").primaryKey(),
+  campId: text("camp_id").references(() => camps.id).notNull(),
+  userId: text("user_id").references(() => users.id).notNull(),
+  userName: text("user_name").notNull(),
+  userRole: text("user_role").notNull(),
+  station: text("station").notNull(),
+  checkInTime: timestamp("check_in_time").defaultNow().notNull(),
+  checkOutTime: timestamp("check_out_time"),
+  approvalStatus: text("approval_status").default("PENDING").notNull(),
+  approvedBy: text("approved_by"),
+  approvedAt: timestamp("approved_at"),
+  notes: text("notes"),
+});
+
+// 14. Lab Parameter Alias Dictionary (Dynamic Multi-Lab OCR Mapping)
+export const labParameterAliases = pgTable("lab_parameter_aliases", {
+  id: text("id").primaryKey(),
+  canonicalKey: text("canonical_key").notNull().unique(),
+  displayLabel: text("display_label").notNull(),
+  aliases: jsonb("aliases").$type<string[]>().default([]).notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// 15. System Settings & Audit Logs
 export const systemSettings = pgTable("system_settings", {
   key: text("key").primaryKey(),
   value: jsonb("value").notNull(),
