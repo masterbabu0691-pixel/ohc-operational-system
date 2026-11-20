@@ -1,7 +1,8 @@
+// Last Updated: 20-11-2026 16:32 IST
 // src/app/lab/page.tsx
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { getCampsList } from "@/actions/camp-actions";
 import {
   getLabQueue,
@@ -25,8 +26,12 @@ import {
 import { BackButton } from "@/components/shared/BackButton";
 import { StationAttendanceBar } from "@/components/shared/StationAttendanceBar";
 
-function escapeRegExp(s: string) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function toCamelKey(label: string) {
+  return label
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+(.)/g, (_, chr) => chr.toUpperCase())
+    .replace(/[^a-zA-Z0-9]/g, "");
 }
 
 function parseLabTextWithAliases(
@@ -34,20 +39,64 @@ function parseLabTextWithAliases(
   aliasList: { canonicalKey: string; aliases: string[] }[]
 ) {
   const result: Record<string, string> = {};
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
   for (const item of aliasList) {
-    for (const alias of item.aliases) {
-      const pattern = new RegExp(
-        `${escapeRegExp(alias)}[\\s:=-]*([A-Za-z0-9.,+-]+)`,
-        "i"
-      );
-      const m = raw.match(pattern);
-      if (m && m[1]) {
-        result[item.canonicalKey] = m[1].trim();
-        break;
+    if (result[item.canonicalKey]) continue;
+    const sortedAliases = [...(item.aliases || [])].sort((a, b) => b.length - a.length);
+
+    for (const alias of sortedAliases) {
+      const upperAlias = alias.toUpperCase();
+      let matched = false;
+
+      for (let i = 0; i < lines.length; i++) {
+        const lineUpper = lines[i].toUpperCase();
+        const idx = lineUpper.indexOf(upperAlias);
+        if (idx === -1) continue;
+
+        const afterAlias = lines[i].slice(idx + alias.length).replace(/^[\s:=-]+/, "").trim();
+        const sameLineVal = afterAlias.match(/^(\d+(?:\.\d+)?(?:\s*-\s*\d+(?:\.\d+)?)?|Negative|Positive|Normal|Nil|Absent|[ABO]{1,2}\s*[+-](?:ve)?)/i);
+        if (sameLineVal?.[1]) {
+          result[item.canonicalKey] = sameLineVal[1].trim();
+          matched = true;
+          break;
+        }
+
+        for (let j = i + 1; j <= Math.min(i + 4, lines.length - 1); j++) {
+          const nextLine = lines[j];
+          if (/^(Method|Machine|Bio\.|Reference|Note)/i.test(nextLine)) continue;
+          const nextVal = nextLine.match(/^(\d+(?:\.\d+)?(?:\s*-\s*\d+(?:\.\d+)?)?|Negative|Positive|Normal|Nil|Absent|[ABO]{1,2}\s*[+-](?:ve)?)\b/i);
+          if (nextVal?.[1]) {
+            result[item.canonicalKey] = nextVal[1].trim();
+            matched = true;
+            break;
+          }
+        }
+        if (matched) break;
       }
+      if (matched) break;
     }
   }
   return result;
+}
+
+function isValueAbnormal(val: string, alias?: any): boolean {
+  if (!val?.trim() || !alias) return false;
+  const clean = val.trim();
+  if (alias.normalText) {
+    const allowed = alias.normalText.toLowerCase().split(",").map((s: string) => s.trim());
+    return !allowed.includes(clean.toLowerCase());
+  }
+  const num = parseFloat(clean);
+  if (isNaN(num)) return false;
+  const min = alias.normalMin ? parseFloat(alias.normalMin) : null;
+  const max = alias.normalMax ? parseFloat(alias.normalMax) : null;
+  if (min !== null && !isNaN(min) && num < min) return true;
+  if (max !== null && !isNaN(max) && num > max) return true;
+  return false;
 }
 
 function checkPdfIdentityMatch(rawText: string, emp: any) {
@@ -69,6 +118,18 @@ function checkPdfIdentityMatch(rawText: string, emp: any) {
   };
 }
 
+const FALLBACK_FIELDS = [
+  { key: "hb", label: "Hb (g/dL)", group: "Blood Test" },
+  { key: "wbc", label: "WBC / TLC", group: "Blood Test" },
+  { key: "platelets", label: "Platelets", group: "Blood Test" },
+  { key: "esr", label: "ESR (mm/hr)", group: "Blood Test" },
+  { key: "sgpt", label: "SGPT / ALT (U/L)", group: "Blood Test" },
+  { key: "creatinine", label: "S. Creatinine", group: "Blood Test" },
+  { key: "rbs", label: "RBS (Blood Sugar)", group: "Blood Test" },
+  { key: "widal", label: "Widal Profile", group: "Blood Test" },
+  { key: "urineRm", label: "Urine R/M", group: "Urine Test" },
+];
+
 export default function LaboratoryQueuePage() {
   const [camps, setCamps] = useState<any[]>([]);
   const [selectedCampId, setSelectedCampId] = useState("");
@@ -77,25 +138,13 @@ export default function LaboratoryQueuePage() {
   const [selectedEmp, setSelectedEmp] = useState<any | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
 
-  // Individual Employee Lab State (Strictly reset on patient change)
   const [bloodGroup, setBloodGroup] = useState("");
-  const [hb, setHb] = useState("");
-  const [wbc, setWbc] = useState("");
-  const [platelets, setPlatelets] = useState("");
-  const [esr, setEsr] = useState("");
-  const [sgpt, setSgpt] = useState("");
-  const [creatinine, setCreatinine] = useState("");
-  const [widal, setWidal] = useState("Negative");
-  const [rbs, setRbs] = useState("");
-  const [hba1c, setHba1c] = useState("");
-  const [urineRm, setUrineRm] = useState("Normal");
-  const [heavyMetal, setHeavyMetal] = useState("");
+  const [labValues, setLabValues] = useState<Record<string, string>>({});
   const [findingsSummary, setFindingsSummary] = useState(
     "All pathology parameters within normal reference limits."
   );
   const [isAbnormal, setIsAbnormal] = useState(false);
 
-  // OCR & Mismatch State
   const [isOcrRunning, setIsOcrRunning] = useState(false);
   const [ocrProgress, setOcrProgress] = useState("");
   const [ocrRawText, setOcrRawText] = useState("");
@@ -131,22 +180,44 @@ export default function LaboratoryQueuePage() {
     loadQueue();
   }, [selectedCampId]);
 
-  // Reset ALL fields strictly to this individual employee's saved data
+  const aliasMap = useMemo(() => {
+    const m = new Map<string, any>();
+    aliases.forEach((a) => m.set(a.canonicalKey, a));
+    return m;
+  }, [aliases]);
+
+  const dynamicFields = useMemo(() => {
+    if (!selectedEmp) return [];
+    const contracted: any[] = selectedEmp.contractedLabServices || [];
+    if (contracted.length === 0) return FALLBACK_FIELDS;
+
+    const list: { key: string; label: string; group: string; alias?: any }[] = [];
+    const seen = new Set<string>();
+
+    contracted.forEach((srv) => {
+      const fields: string[] = srv.schemaDefinition?.fields || [];
+      fields.forEach((f) => {
+        const key = toCamelKey(f);
+        if (!key || key === "bloodGroup" || seen.has(key)) return;
+        seen.add(key);
+        const alias = aliasMap.get(key);
+        list.push({
+          key,
+          label: alias?.displayLabel || f.trim(),
+          group: srv.subCategory || "Blood Test",
+          alias,
+        });
+      });
+    });
+
+    return list.length > 0 ? list : FALLBACK_FIELDS;
+  }, [selectedEmp, aliasMap]);
+
   const handleSelectEmp = (emp: any) => {
     setSelectedEmp(emp);
     const saved = emp.savedLabData || {};
     setBloodGroup(emp.bloodGroup || "");
-    setHb(saved.hb || "");
-    setWbc(saved.wbc || "");
-    setPlatelets(saved.platelets || "");
-    setEsr(saved.esr || "");
-    setSgpt(saved.sgpt || "");
-    setCreatinine(saved.creatinine || "");
-    setWidal(saved.widal || "Negative");
-    setRbs(saved.rbs || "");
-    setHba1c(saved.hba1c || "");
-    setUrineRm(saved.urineRm || "Normal");
-    setHeavyMetal(saved.heavyMetal || "");
+    setLabValues({ ...saved });
     setFindingsSummary(emp.savedFindings || "All pathology parameters within normal reference limits.");
     setIsAbnormal(Boolean(emp.savedAbnormal));
     setIdentityMismatch(Boolean(emp.identityMismatch));
@@ -154,6 +225,13 @@ export default function LaboratoryQueuePage() {
     setOcrRawText("");
     setOcrProgress("");
     setUsedOcr(false);
+  };
+
+  const handleValueChange = (key: string, val: string) => {
+    const next = { ...labValues, [key]: val };
+    setLabValues(next);
+    const anyAbn = dynamicFields.some((f) => isValueAbnormal(next[f.key] || "", aliasMap.get(f.key)));
+    if (anyAbn) setIsAbnormal(true);
   };
 
   const handleToggleArrived = async () => {
@@ -165,7 +243,6 @@ export default function LaboratoryQueuePage() {
     }
   };
 
-  // Multi-Page PDF + Image Free In-Browser OCR
   const handleOcrUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !selectedEmp) return;
@@ -195,16 +272,12 @@ export default function LaboratoryQueuePage() {
           canvas.height = viewport.height;
           const ctx = canvas.getContext("2d")!;
           await page.render({ canvasContext: ctx, viewport, canvas }).promise;
-          const {
-            data: { text },
-          } = await worker.recognize(canvas);
+          const { data: { text } } = await worker.recognize(canvas);
           fullExtractedText += `\n--- Page ${pageNum} ---\n${text}`;
         }
       } else {
         setOcrProgress("Scanning Image...");
-        const {
-          data: { text },
-        } = await worker.recognize(file);
+        const { data: { text } } = await worker.recognize(file);
         fullExtractedText = text;
       }
 
@@ -212,23 +285,20 @@ export default function LaboratoryQueuePage() {
       setOcrRawText(fullExtractedText);
       setUsedOcr(true);
 
-      // Check Patient Identity Match
       const idCheck = checkPdfIdentityMatch(fullExtractedText, selectedEmp);
       setIdentityMismatch(idCheck.mismatch);
       setIdentityMismatchNote(idCheck.note);
 
-      // Parse dynamically using Admin Alias Dictionary
       const parsed = parseLabTextWithAliases(fullExtractedText, aliases);
-      if (parsed.hb) setHb(parsed.hb);
-      if (parsed.wbc) setWbc(parsed.wbc);
-      if (parsed.platelets) setPlatelets(parsed.platelets);
-      if (parsed.esr) setEsr(parsed.esr);
-      if (parsed.sgpt) setSgpt(parsed.sgpt);
-      if (parsed.creatinine) setCreatinine(parsed.creatinine);
-      if (parsed.rbs) setRbs(parsed.rbs);
-      if (parsed.hba1c) setHba1c(parsed.hba1c);
-      if (parsed.widal) setWidal(parsed.widal);
+      const nextValues = { ...labValues };
+      dynamicFields.forEach((f) => {
+        if (parsed[f.key]) nextValues[f.key] = parsed[f.key];
+      });
+      setLabValues(nextValues);
       if (parsed.bloodGroup) setBloodGroup(parsed.bloodGroup);
+
+      const anyAbn = dynamicFields.some((f) => isValueAbnormal(nextValues[f.key] || "", aliasMap.get(f.key)));
+      if (anyAbn) setIsAbnormal(true);
     } catch (err: any) {
       alert("OCR failed on this file. Please enter values manually. (" + err?.message + ")");
     } finally {
@@ -251,7 +321,7 @@ export default function LaboratoryQueuePage() {
       employeeId: selectedEmp.employeeId,
       campId: selectedCampId,
       bloodGroup,
-      labValues: { hb, wbc, platelets, esr, sgpt, creatinine, widal, rbs, hba1c, urineRm, heavyMetal },
+      labValues,
       findingsSummary,
       isAbnormal,
       identityMismatch,
@@ -300,7 +370,7 @@ export default function LaboratoryQueuePage() {
           <div>
             <div className="flex items-center space-x-2 text-blue-600 font-bold text-xs uppercase tracking-wider">
               <Microscope className="w-4 h-4" />
-              <span>Pathology & Lab Results Entry</span>
+              <span>Pathology & Lab Results Entry (Strict Package Mode)</span>
             </div>
             <h1 className="text-2xl font-black text-[#002642]">Laboratory Queue & Multi-Page PDF OCR</h1>
           </div>
@@ -329,7 +399,6 @@ export default function LaboratoryQueuePage() {
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Deduplicated Single-Card Queue */}
           <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-3">
             <div className="relative">
               <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-400" />
@@ -372,7 +441,6 @@ export default function LaboratoryQueuePage() {
             </div>
           </div>
 
-          {/* Individual Entry + Multi-Page PDF OCR */}
           <div className="lg:col-span-2 bg-white border border-slate-200 rounded-2xl p-6 shadow-xs">
             {selectedEmp ? (
               <form onSubmit={handleSave} className="space-y-5">
@@ -423,12 +491,11 @@ export default function LaboratoryQueuePage() {
                   </div>
                 )}
 
-                {/* Multi-Page PDF / Image OCR Box */}
                 <div className="p-4 bg-blue-50/60 border border-blue-200 rounded-xl space-y-2">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <div className="text-xs font-bold text-blue-900 flex items-center space-x-1.5">
                       <Sparkles className="w-4 h-4 text-blue-600" />
-                      <span>Free Multi-Page PDF / Image OCR (Uses Admin Parameter Aliases)</span>
+                      <span>Smart Multi-Page PDF OCR (Extracts Contracted Parameters Only)</span>
                     </div>
                     <label className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold cursor-pointer flex items-center space-x-1.5 w-fit">
                       {isOcrRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
@@ -443,56 +510,34 @@ export default function LaboratoryQueuePage() {
                   )}
                 </div>
 
-                {/* Blood Investigation Inputs */}
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
                   <div>
                     <label className="block font-semibold text-slate-600 mb-1">Blood Group</label>
                     <input type="text" value={bloodGroup} onChange={(e) => setBloodGroup(e.target.value)} placeholder="e.g. O +ve" disabled={selectedEmp.isLocked} className="w-full px-3 py-1.5 border rounded-xl" />
                   </div>
-                  <div>
-                    <label className="block font-semibold text-slate-600 mb-1">Hb (g/dL)</label>
-                    <input type="text" value={hb} onChange={(e) => setHb(e.target.value)} placeholder="e.g. 14.2" disabled={selectedEmp.isLocked} className="w-full px-3 py-1.5 border rounded-xl" />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-600 mb-1">WBC (/cumm)</label>
-                    <input type="text" value={wbc} onChange={(e) => setWbc(e.target.value)} placeholder="e.g. 7200" disabled={selectedEmp.isLocked} className="w-full px-3 py-1.5 border rounded-xl" />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-600 mb-1">Platelets</label>
-                    <input type="text" value={platelets} onChange={(e) => setPlatelets(e.target.value)} placeholder="e.g. 2.5" disabled={selectedEmp.isLocked} className="w-full px-3 py-1.5 border rounded-xl" />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-600 mb-1">ESR (mm/hr)</label>
-                    <input type="text" value={esr} onChange={(e) => setEsr(e.target.value)} placeholder="e.g. 10" disabled={selectedEmp.isLocked} className="w-full px-3 py-1.5 border rounded-xl" />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-600 mb-1">SGPT / ALT (U/L)</label>
-                    <input type="text" value={sgpt} onChange={(e) => setSgpt(e.target.value)} placeholder="e.g. 28" disabled={selectedEmp.isLocked} className="w-full px-3 py-1.5 border rounded-xl" />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-600 mb-1">S. Creatinine</label>
-                    <input type="text" value={creatinine} onChange={(e) => setCreatinine(e.target.value)} placeholder="e.g. 0.9" disabled={selectedEmp.isLocked} className="w-full px-3 py-1.5 border rounded-xl" />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-600 mb-1">RBS (Random Sugar)</label>
-                    <input type="text" value={rbs} onChange={(e) => setRbs(e.target.value)} placeholder="e.g. 102" disabled={selectedEmp.isLocked} className="w-full px-3 py-1.5 border rounded-xl" />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-600 mb-1">HbA1c (%)</label>
-                    <input type="text" value={hba1c} onChange={(e) => setHba1c(e.target.value)} placeholder="e.g. 5.6" disabled={selectedEmp.isLocked} className="w-full px-3 py-1.5 border rounded-xl" />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-600 mb-1">Widal Profile</label>
-                    <input type="text" value={widal} onChange={(e) => setWidal(e.target.value)} disabled={selectedEmp.isLocked} className="w-full px-3 py-1.5 border rounded-xl" />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-600 mb-1">Urine R/M</label>
-                    <input type="text" value={urineRm} onChange={(e) => setUrineRm(e.target.value)} disabled={selectedEmp.isLocked} className="w-full px-3 py-1.5 border rounded-xl" />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-600 mb-1">Heavy Metal / Special</label>
-                    <input type="text" value={heavyMetal} onChange={(e) => setHeavyMetal(e.target.value)} placeholder="Optional" disabled={selectedEmp.isLocked} className="w-full px-3 py-1.5 border rounded-xl" />
-                  </div>
+
+                  {dynamicFields.map((field) => {
+                    const val = labValues[field.key] || "";
+                    const alias = aliasMap.get(field.key);
+                    const abnormal = isValueAbnormal(val, alias);
+                    return (
+                      <div key={field.key}>
+                        <label className="block font-semibold text-slate-600 mb-1 truncate" title={field.label}>
+                          {field.label} {alias?.unit ? `(${alias.unit})` : ""}
+                        </label>
+                        <input
+                          type="text"
+                          value={val}
+                          onChange={(e) => handleValueChange(field.key, e.target.value)}
+                          placeholder={alias?.normalText ? `e.g. ${alias.normalText}` : alias?.normalMin ? `${alias.normalMin}-${alias.normalMax}` : "Enter result"}
+                          disabled={selectedEmp.isLocked}
+                          className={`w-full px-3 py-1.5 border rounded-xl ${
+                            abnormal ? "border-rose-500 bg-rose-50 font-bold text-rose-900" : "border-slate-300"
+                          }`}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
 
                 <div className="space-y-1 text-xs">

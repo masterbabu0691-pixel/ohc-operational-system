@@ -91,10 +91,14 @@ export const agencies = pgTable("agencies", {
 });
 
 // 3. Dynamic Services & Packages
+// Last Updated: 20-11-2026 15:53 IST
+// 3. Dynamic Services & Packages
 export const services = pgTable("services", {
   id: text("id").primaryKey(),
   code: text("code").notNull().unique(),
   name: text("name").notNull(),
+  mainCategory: text("main_category").default("PATHOLOGY").notNull(),
+  subCategory: text("sub_category").default("Blood Test").notNull(),
   station: stationTypeEnum("station").notNull(),
   schemaDefinition: jsonb("schema_definition").notNull(),
   isActive: boolean("is_active").default(true).notNull(),
@@ -386,11 +390,16 @@ export const staffAttendance = pgTable("staff_attendance", {
   notes: text("notes"),
 });
 
-// 14. Lab Parameter Alias Dictionary (Dynamic Multi-Lab OCR Mapping)
+// // Last Updated: 20-11-2026 15:53 IST
+// 14. Lab Parameter Alias Dictionary (Dynamic Multi-Lab OCR Mapping + Normal Ranges)
 export const labParameterAliases = pgTable("lab_parameter_aliases", {
   id: text("id").primaryKey(),
   canonicalKey: text("canonical_key").notNull().unique(),
   displayLabel: text("display_label").notNull(),
+  unit: text("unit"),
+  normalMin: text("normal_min"),
+  normalMax: text("normal_max"),
+  normalText: text("normal_text"),
   aliases: jsonb("aliases").$type<string[]>().default([]).notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

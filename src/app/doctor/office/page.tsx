@@ -1,3 +1,4 @@
+// Last Updated: 20-11-2026 17:25 IST
 // src/app/doctor/office/page.tsx
 "use client";
 
@@ -8,6 +9,7 @@ import { submitOfficeDoctorReview } from "@/actions/clinical-actions";
 import {
   getEmployeeFullDossier,
   officeDoctorUpdateEmployeeData,
+  getLabParameterAliases,
 } from "@/actions/diagnostic-actions";
 import {
   CheckCircle2,
@@ -25,8 +27,25 @@ import { BackButton } from "@/components/shared/BackButton";
 
 type FitnessOption = "FIT" | "FIT_WITH_CONDITION" | "TEMPORARILY_UNFIT_FOLLOW_UP" | "UNFIT";
 
+function isValueAbnormal(val: string, alias?: any): boolean {
+  if (!val?.trim() || !alias) return false;
+  const clean = val.trim();
+  if (alias.normalText) {
+    const allowed = alias.normalText.toLowerCase().split(",").map((s: string) => s.trim());
+    return !allowed.includes(clean.toLowerCase());
+  }
+  const num = parseFloat(clean);
+  if (isNaN(num)) return false;
+  const min = alias.normalMin ? parseFloat(alias.normalMin) : null;
+  const max = alias.normalMax ? parseFloat(alias.normalMax) : null;
+  if (min !== null && !isNaN(min) && num < min) return true;
+  if (max !== null && !isNaN(max) && num > max) return true;
+  return false;
+}
+
 export default function OfficeDoctorPortal() {
   const [camps, setCamps] = useState<any[]>([]);
+  const [aliases, setAliases] = useState<any[]>([]);
   const [selectedCampId, setSelectedCampId] = useState("");
   const [employees, setEmployees] = useState<any[]>([]);
   const [selectedEmp, setSelectedEmp] = useState<any | null>(null);
@@ -64,8 +83,12 @@ export default function OfficeDoctorPortal() {
 
   useEffect(() => {
     async function load() {
-      const data = await getCampsList();
+      const [data, aliasList] = await Promise.all([
+        getCampsList(),
+        getLabParameterAliases(),
+      ]);
       setCamps(data);
+      setAliases(aliasList);
       if (data.length > 0) setSelectedCampId(data[0].id);
     }
     load();
@@ -209,6 +232,8 @@ export default function OfficeDoctorPortal() {
   const labDiag = dossier?.diagnostics?.find((d: any) => d.station === "PATHOLOGY_LAB");
   const labData = labDiag?.structuredData || {};
   const activeCamp = camps.find((c) => c.id === selectedCampId);
+  const nonLabDiagnostics = (dossier?.diagnostics || []).filter((d: any) => d.station !== "PATHOLOGY_LAB");
+  const filledLabEntries = Object.entries(labData).filter(([, val]) => String(val || "").trim() !== "");
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-4 sm:p-6 space-y-5">
@@ -596,16 +621,41 @@ export default function OfficeDoctorPortal() {
                 </div>
 
                 <div>
-                  <div className="p-1.5 font-bold text-center border-b border-slate-800 bg-slate-100">Blood Investigation</div>
-                  <div className="p-1.5 border-b border-slate-300"><strong>Hb:</strong> {labData.hb || "-"}</div>
-                  <div className="p-1.5 border-b border-slate-300"><strong>WBC:</strong> {labData.wbc || "-"}</div>
-                  <div className="p-1.5 border-b border-slate-300"><strong>Platelets:</strong> {labData.platelets || "-"}</div>
-                  <div className="p-1.5 border-b border-slate-300"><strong>ESR:</strong> {labData.esr || "-"} | <strong>SGPT:</strong> {labData.sgpt || "-"}</div>
-                  <div className="p-1.5 border-b border-slate-300"><strong>S. Creatinine:</strong> {labData.creatinine || "-"}</div>
-                  <div className="p-1.5 border-b border-slate-300"><strong>Widal:</strong> {labData.widal || "-"} | <strong>RBS:</strong> {labData.rbs || "-"}</div>
-                  <div className="p-1.5"><strong>Urine R/M:</strong> {labData.urineRm || "-"}</div>
+                  <div className="p-1.5 font-bold text-center border-b border-slate-800 bg-slate-100">Pathology / Lab Investigation</div>
+                  {filledLabEntries.map(([key, val]) => {
+                    const alias = aliases.find((a) => a.canonicalKey === key);
+                    const label = alias?.displayLabel || key.toUpperCase();
+                    const abnormal = isValueAbnormal(String(val), alias);
+                    return (
+                      <div key={key} className="p-1.5 border-b border-slate-300 flex justify-between gap-2">
+                        <span>{label}:</span>
+                        <span className={abnormal ? "font-black text-slate-950 underline" : "font-normal text-slate-800"}>
+                          {String(val)} {alias?.unit || ""}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  {filledLabEntries.length === 0 && (
+                    <div className="p-2 text-slate-500 italic">No pathology results recorded.</div>
+                  )}
                 </div>
               </div>
+
+              {nonLabDiagnostics.length > 0 && (
+                <div className="border border-t-0 border-slate-800 text-[11px]">
+                  <div className="p-1.5 font-bold bg-slate-100 border-b border-slate-800">
+                    Diagnostic Investigations
+                  </div>
+                  {nonLabDiagnostics.map((diag: any) => (
+                    <div key={diag.id} className="p-1.5 border-b border-slate-300 last:border-b-0 flex justify-between gap-3">
+                      <span className="font-semibold">{diag.station.replace(/_/g, " ")}:</span>
+                      <span className={diag.isAbnormal ? "font-black text-slate-950" : "font-normal text-slate-800"}>
+                        {diag.findingsSummary}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               <div className="border border-t-0 border-slate-800 p-2 flex justify-between items-center text-[11px]">
                 <div>

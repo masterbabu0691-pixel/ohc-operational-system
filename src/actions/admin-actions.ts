@@ -1,3 +1,4 @@
+// Last Updated: 20-11-2026 16:30 IST
 // src/actions/admin-actions.ts
 "use server";
 
@@ -15,6 +16,7 @@ import {
   users,
   staffAttendance,
   staffDocuments,
+  labParameterAliases,
   systemSettings,
   auditLogs,
   stationTypeEnum,
@@ -101,16 +103,46 @@ export async function getAdminServices() {
   }
 }
 
+// Last Updated: 20-11-2026 15:53 IST
 export async function createOrUpdateService(data: {
   id?: string;
   code: string;
   name: string;
+  mainCategory?: string;
+  subCategory?: string;
   station: (typeof stationTypeEnum.enumValues)[number];
   fields: string[];
   isActive?: boolean;
 }) {
   try {
     const serviceId = data.id || `srv_${nanoid(8)}`;
+    const defaultMain =
+      data.mainCategory ||
+      (data.station === "PATHOLOGY_LAB" || data.station === "PHLEBOTOMY"
+        ? "PATHOLOGY"
+        : data.station === "VITALS_ANTHROPOMETRY" ||
+          data.station === "NURSING_STATION" ||
+          data.station === "VISION_SCREENING"
+        ? "VITALS_ANTHROPOMETRY"
+        : data.station === "DOCTOR_EXAMINATION" ||
+          data.station === "FIELD_DOCTOR_EXAM" ||
+          data.station === "OFFICE_DOCTOR_REVIEW"
+        ? "DOCTOR_FITNESS"
+        : "DIAGNOSTICS");
+
+    const defaultSub =
+      data.subCategory ||
+      (data.station === "PATHOLOGY_LAB"
+        ? "Blood Test"
+        : data.station === "CHEST_XRAY"
+        ? "X-Ray"
+        : data.station === "ECG"
+        ? "ECG"
+        : data.station === "SPIROMETRY_PFT"
+        ? "Spirometry / PFT"
+        : data.station === "AUDIOMETRY"
+        ? "Audiometry"
+        : "General");
 
     await db
       .insert(services)
@@ -118,6 +150,8 @@ export async function createOrUpdateService(data: {
         id: serviceId,
         code: data.code.toUpperCase().trim(),
         name: data.name.trim(),
+        mainCategory: defaultMain,
+        subCategory: defaultSub,
         station: data.station,
         schemaDefinition: { fields: data.fields },
         isActive: data.isActive ?? true,
@@ -126,14 +160,41 @@ export async function createOrUpdateService(data: {
         target: services.code,
         set: {
           name: data.name.trim(),
+          mainCategory: defaultMain,
+          subCategory: defaultSub,
           station: data.station,
           schemaDefinition: { fields: data.fields },
           isActive: data.isActive ?? true,
         },
       });
 
+    // Auto-create default OCR alias entries for every parameter in a PATHOLOGY_LAB test
+    if (data.station === "PATHOLOGY_LAB" && data.fields.length > 0) {
+      for (const rawField of data.fields) {
+        const cleanLabel = rawField.trim();
+        if (!cleanLabel) continue;
+        const canonicalKey = cleanLabel
+          .toLowerCase()
+          .replace(/[^a-z0-9]+(.)/g, (_, chr) => chr.toUpperCase())
+          .replace(/[^a-zA-Z0-9]/g, "");
+        if (!canonicalKey) continue;
+
+        await db
+          .insert(labParameterAliases)
+          .values({
+            id: `alias_${nanoid(8)}`,
+            canonicalKey,
+            displayLabel: cleanLabel,
+            aliases: [cleanLabel.toUpperCase()],
+            updatedAt: new Date(),
+          })
+          .onConflictDoNothing();
+      }
+    }
+
     revalidatePath("/admin/services");
     revalidatePath("/clients");
+    revalidatePath("/lab");
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err.message };

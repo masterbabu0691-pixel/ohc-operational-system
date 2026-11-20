@@ -1,7 +1,8 @@
+// Last Updated: 20-11-2026 16:32 IST
 // src/app/clients/page.tsx
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   getMasterServices,
   getAllClientsWithDetails,
@@ -29,7 +30,16 @@ interface ServiceItem {
   code: string;
   name: string;
   station: string;
+  mainCategory?: string;
+  subCategory?: string;
 }
+
+const MAIN_CATEGORY_LABELS: Record<string, string> = {
+  VITALS_ANTHROPOMETRY: "1. Vitals & Anthropometry",
+  DIAGNOSTICS: "2. Diagnostics (X-Ray / ECG / PFT / Audiometry)",
+  PATHOLOGY: "3. Pathology (Blood / Urine / Stool / Special)",
+  DOCTOR_FITNESS: "4. Doctor Systemic Exam & Fitness",
+};
 
 const STRENGTH_OPTIONS = [
   "1-100",
@@ -72,16 +82,34 @@ function generateUniquePrefix(name: string) {
   return `${prefix.toUpperCase()}-${rand}`;
 }
 
+function inferMainCategory(srv: ServiceItem) {
+  if (srv.mainCategory) return srv.mainCategory;
+  if (srv.station === "PATHOLOGY_LAB" || srv.station === "PHLEBOTOMY") return "PATHOLOGY";
+  if (
+    srv.station === "VITALS_ANTHROPOMETRY" ||
+    srv.station === "NURSING_STATION" ||
+    srv.station === "VISION_SCREENING"
+  ) {
+    return "VITALS_ANTHROPOMETRY";
+  }
+  if (
+    srv.station === "DOCTOR_EXAMINATION" ||
+    srv.station === "FIELD_DOCTOR_EXAM" ||
+    srv.station === "OFFICE_DOCTOR_REVIEW"
+  ) {
+    return "DOCTOR_FITNESS";
+  }
+  return "DIAGNOSTICS";
+}
+
 export default function ClientsPage() {
   const [servicesList, setServicesList] = useState<ServiceItem[]>([]);
   const [clientsList, setClientsList] = useState<any[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
 
-  // Edit mode state
   const [editingClientId, setEditingClientId] = useState<string | null>(null);
   const [editingPackageId, setEditingPackageId] = useState<string | null>(null);
 
-  // Form fields
   const [selectedServices, setSelectedServices] = useState<string[]>(["srv_vitals", "srv_doc_exam"]);
   const [clientName, setClientName] = useState("");
   const [clientCode, setClientCode] = useState("");
@@ -112,6 +140,23 @@ export default function ClientsPage() {
   useEffect(() => {
     loadData();
   }, []);
+
+  const groupedServices = useMemo(() => {
+    const groups: Record<string, Record<string, ServiceItem[]>> = {
+      VITALS_ANTHROPOMETRY: {},
+      DIAGNOSTICS: {},
+      PATHOLOGY: {},
+      DOCTOR_FITNESS: {},
+    };
+    servicesList.forEach((srv) => {
+      const mc = inferMainCategory(srv);
+      const sub = srv.subCategory || srv.station || "General";
+      if (!groups[mc]) groups[mc] = {};
+      if (!groups[mc][sub]) groups[mc][sub] = [];
+      groups[mc][sub].push(srv);
+    });
+    return groups;
+  }, [servicesList]);
 
   const resetForm = () => {
     setEditingClientId(null);
@@ -170,6 +215,16 @@ export default function ClientsPage() {
     setSelectedServices((prev) =>
       prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]
     );
+  };
+
+  const toggleCategoryAll = (items: ServiceItem[]) => {
+    const ids = items.map((i) => i.id);
+    const allSelected = ids.every((id) => selectedServices.includes(id));
+    if (allSelected) {
+      setSelectedServices((prev) => prev.filter((id) => !ids.includes(id)));
+    } else {
+      setSelectedServices((prev) => Array.from(new Set([...prev, ...ids])));
+    }
   };
 
   const addContactRow = () => {
@@ -289,7 +344,6 @@ export default function ClientsPage() {
       <div className="max-w-5xl mx-auto space-y-8">
         <BackButton fallbackHref="/admin" label="Back to Dashboard" />
 
-        {/* Header */}
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 border-b border-slate-200 pb-6">
           <div>
             <div className="flex items-center space-x-2 text-indigo-600 font-semibold text-sm">
@@ -300,7 +354,7 @@ export default function ClientsPage() {
               {editingClientId ? `Edit Client: ${clientName}` : "Onboard Client & Dynamic Package"}
             </h1>
             <p className="text-sm text-slate-500 mt-1">
-              Configure contracted diagnostic stations per client. Only selected stations will appear during camps.
+              Configure contracted Main Stations & Sub-Tests per client. Only selected tests appear during camps and in Final Summaries.
             </p>
           </div>
           {editingClientId && (
@@ -322,7 +376,6 @@ export default function ClientsPage() {
           </div>
         )}
 
-        {/* Form */}
         <form onSubmit={handleSubmit} className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 md:p-8 space-y-8">
           <div className="space-y-4">
             <h2 className="text-lg font-semibold text-slate-800 flex items-center space-x-2">
@@ -436,9 +489,7 @@ export default function ClientsPage() {
                     className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     {STRENGTH_OPTIONS.map((opt) => (
-                      <option key={opt} value={opt}>
-                        {opt}
-                      </option>
+                      <option key={opt} value={opt}>{opt}</option>
                     ))}
                   </select>
                 </div>
@@ -450,9 +501,7 @@ export default function ClientsPage() {
                     className="w-full px-3 py-2 border border-slate-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     {CAMP_MONTHS.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
+                      <option key={m} value={m}>{m}</option>
                     ))}
                   </select>
                 </div>
@@ -483,7 +532,6 @@ export default function ClientsPage() {
               />
             </div>
 
-            {/* Multiple Contact Persons */}
             <div className="pt-2 space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-slate-700 flex items-center space-x-1.5">
@@ -502,47 +550,12 @@ export default function ClientsPage() {
 
               {additionalContacts.map((contact, idx) => (
                 <div key={idx} className="grid grid-cols-1 md:grid-cols-6 gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg items-center">
-                  <input
-                    type="text"
-                    placeholder="Name *"
-                    value={contact.name}
-                    onChange={(e) => updateContactRow(idx, "name", e.target.value)}
-                    className="px-2.5 py-1.5 border border-slate-300 rounded text-xs bg-white"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Designation"
-                    value={contact.designation || ""}
-                    onChange={(e) => updateContactRow(idx, "designation", e.target.value)}
-                    className="px-2.5 py-1.5 border border-slate-300 rounded text-xs bg-white"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Department"
-                    value={contact.department || ""}
-                    onChange={(e) => updateContactRow(idx, "department", e.target.value)}
-                    className="px-2.5 py-1.5 border border-slate-300 rounded text-xs bg-white"
-                  />
-                  <input
-                    type="email"
-                    placeholder="Email"
-                    value={contact.email || ""}
-                    onChange={(e) => updateContactRow(idx, "email", e.target.value)}
-                    className="px-2.5 py-1.5 border border-slate-300 rounded text-xs bg-white"
-                  />
-                  <input
-                    type="tel"
-                    placeholder="Phone"
-                    value={contact.phone || ""}
-                    onChange={(e) => updateContactRow(idx, "phone", e.target.value)}
-                    className="px-2.5 py-1.5 border border-slate-300 rounded text-xs bg-white"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => removeContactRow(idx)}
-                    className="p-1.5 text-rose-600 hover:bg-rose-50 rounded justify-self-end"
-                    title="Remove contact"
-                  >
+                  <input type="text" placeholder="Name *" value={contact.name} onChange={(e) => updateContactRow(idx, "name", e.target.value)} className="px-2.5 py-1.5 border border-slate-300 rounded text-xs bg-white" />
+                  <input type="text" placeholder="Designation" value={contact.designation || ""} onChange={(e) => updateContactRow(idx, "designation", e.target.value)} className="px-2.5 py-1.5 border border-slate-300 rounded text-xs bg-white" />
+                  <input type="text" placeholder="Department" value={contact.department || ""} onChange={(e) => updateContactRow(idx, "department", e.target.value)} className="px-2.5 py-1.5 border border-slate-300 rounded text-xs bg-white" />
+                  <input type="email" placeholder="Email" value={contact.email || ""} onChange={(e) => updateContactRow(idx, "email", e.target.value)} className="px-2.5 py-1.5 border border-slate-300 rounded text-xs bg-white" />
+                  <input type="tel" placeholder="Phone" value={contact.phone || ""} onChange={(e) => updateContactRow(idx, "phone", e.target.value)} className="px-2.5 py-1.5 border border-slate-300 rounded text-xs bg-white" />
+                  <button type="button" onClick={() => removeContactRow(idx)} className="p-1.5 text-rose-600 hover:bg-rose-50 rounded justify-self-end" title="Remove contact">
                     <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
@@ -552,15 +565,14 @@ export default function ClientsPage() {
 
           <hr className="border-slate-100" />
 
-          {/* Service Checkboxes */}
-          <div className="space-y-4">
+          <div className="space-y-5">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold text-slate-800 flex items-center space-x-2">
                 <Stethoscope className="w-5 h-5 text-indigo-500" />
-                <span>2. Dynamic Service Package Setup</span>
+                <span>2. Dynamic Service Package Setup (By Main Station)</span>
               </h2>
               <span className="text-xs bg-indigo-50 text-indigo-700 font-semibold px-2.5 py-1 rounded-full">
-                {selectedServices.length} Stations Selected
+                {selectedServices.length} Services Selected
               </span>
             </div>
 
@@ -574,31 +586,64 @@ export default function ClientsPage() {
               />
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 pt-2">
-              {servicesList.map((srv) => {
-                const isChecked = selectedServices.includes(srv.id);
+            <div className="space-y-5">
+              {Object.entries(MAIN_CATEGORY_LABELS).map(([mcKey, mcTitle]) => {
+                const subMap = groupedServices[mcKey] || {};
+                const allInGroup = Object.values(subMap).flat();
+                if (allInGroup.length === 0) return null;
+                const allChecked = allInGroup.every((s) => selectedServices.includes(s.id));
+
                 return (
-                  <div
-                    key={srv.id}
-                    onClick={() => toggleService(srv.id)}
-                    className={`cursor-pointer border rounded-lg p-3 transition flex items-start space-x-3 select-none ${
-                      isChecked
-                        ? "border-indigo-600 bg-indigo-50/40 text-slate-900"
-                        : "border-slate-200 bg-white hover:border-slate-300 text-slate-600"
-                    }`}
-                  >
-                    <div
-                      className={`w-5 h-5 mt-0.5 rounded flex items-center justify-center border transition ${
-                        isChecked
-                          ? "bg-indigo-600 border-indigo-600 text-white"
-                          : "border-slate-300 bg-white"
-                      }`}
-                    >
-                      {isChecked && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                  <div key={mcKey} className="border border-slate-200 rounded-xl p-4 bg-slate-50/50 space-y-3">
+                    <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                      <h3 className="text-sm font-bold text-slate-800">{mcTitle}</h3>
+                      <button
+                        type="button"
+                        onClick={() => toggleCategoryAll(allInGroup)}
+                        className="text-xs font-semibold text-indigo-600 hover:text-indigo-800"
+                      >
+                        {allChecked ? "Clear Group" : "Select All"}
+                      </button>
                     </div>
-                    <div>
-                      <div className="text-sm font-semibold">{srv.name}</div>
-                      <div className="text-xs text-slate-400 font-mono mt-0.5">{srv.code}</div>
+
+                    <div className="space-y-3">
+                      {Object.entries(subMap).map(([subName, items]) => (
+                        <div key={subName} className="space-y-1.5">
+                          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                            {subName}
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                            {items.map((srv) => {
+                              const isChecked = selectedServices.includes(srv.id);
+                              return (
+                                <div
+                                  key={srv.id}
+                                  onClick={() => toggleService(srv.id)}
+                                  className={`cursor-pointer border rounded-lg p-3 transition flex items-start space-x-3 select-none ${
+                                    isChecked
+                                      ? "border-indigo-600 bg-indigo-50/60 text-slate-900"
+                                      : "border-slate-200 bg-white hover:border-slate-300 text-slate-600"
+                                  }`}
+                                >
+                                  <div
+                                    className={`w-5 h-5 mt-0.5 rounded flex items-center justify-center border transition shrink-0 ${
+                                      isChecked
+                                        ? "bg-indigo-600 border-indigo-600 text-white"
+                                        : "border-slate-300 bg-white"
+                                    }`}
+                                  >
+                                    {isChecked && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                                  </div>
+                                  <div className="min-w-0">
+                                    <div className="text-sm font-semibold truncate">{srv.name}</div>
+                                    <div className="text-xs text-slate-400 font-mono mt-0.5">{srv.code}</div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 );
@@ -633,13 +678,10 @@ export default function ClientsPage() {
           </div>
         </form>
 
-        {/* Existing Clients Directory */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 md:p-8 space-y-4">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
             <div>
-              <h2 className="text-lg font-semibold text-slate-800">
-                Onboarded Clients ({clientsList.length})
-              </h2>
+              <h2 className="text-lg font-semibold text-slate-800">Onboarded Clients ({clientsList.length})</h2>
               <p className="text-xs text-slate-500">
                 Click Edit on any client to update contacts, strength, camp month, or contracted stations.
               </p>
@@ -670,18 +712,12 @@ export default function ClientsPage() {
                   <div className="space-y-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-semibold text-slate-900">{c.name}</span>
-                      <span className="text-xs font-mono bg-slate-100 text-slate-700 px-2 py-0.5 rounded">
-                        {c.code}
-                      </span>
+                      <span className="text-xs font-mono bg-slate-100 text-slate-700 px-2 py-0.5 rounded">{c.code}</span>
                       {c.campMonth && (
-                        <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-medium">
-                          {c.campMonth}
-                        </span>
+                        <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-medium">{c.campMonth}</span>
                       )}
                       {c.totalStrength && (
-                        <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded font-medium">
-                          Strength: {c.totalStrength}
-                        </span>
+                        <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded font-medium">Strength: {c.totalStrength}</span>
                       )}
                     </div>
                     <div className="text-xs text-slate-500 flex flex-wrap gap-x-4 gap-y-1">
@@ -691,13 +727,9 @@ export default function ClientsPage() {
                         {c.phone ? ` • ${c.phone}` : ""}
                       </span>
                       {c.additionalContacts?.length > 0 && (
-                        <span className="text-indigo-600 font-medium">
-                          +{c.additionalContacts.length} extra contact(s)
-                        </span>
+                        <span className="text-indigo-600 font-medium">+{c.additionalContacts.length} extra contact(s)</span>
                       )}
-                      <span>
-                        Package: {c.packageName} ({c.selectedServiceIds?.length || 0} stations)
-                      </span>
+                      <span>Package: {c.packageName} ({c.selectedServiceIds?.length || 0} services)</span>
                     </div>
                   </div>
 

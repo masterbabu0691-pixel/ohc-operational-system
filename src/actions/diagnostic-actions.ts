@@ -1,3 +1,4 @@
+// Last Updated: 20-11-2026 15:53 IST
 // src/actions/diagnostic-actions.ts
 "use server";
 
@@ -5,6 +6,8 @@ import { db } from "@/db";
 import {
   employees,
   agencies,
+  camps,
+  clientPackages,
   stationChecklist,
   diagnosticRecords,
   fieldDoctorExams,
@@ -15,22 +18,23 @@ import {
   labParameterAliases,
   stationTypeEnum,
 } from "@/db/schema";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { nanoid } from "nanoid";
 import { getSession } from "@/lib/auth";
 
 const DEFAULT_LAB_ALIASES = [
-  { canonicalKey: "hb", displayLabel: "Hemoglobin (Hb)", aliases: ["HB", "HEMOGLOBIN", "HAEMOGLOBIN"] },
-  { canonicalKey: "wbc", displayLabel: "WBC / TLC", aliases: ["WBC", "TOTAL LEUKOCYTE", "TLC", "WHITE BLOOD CELL"] },
-  { canonicalKey: "platelets", displayLabel: "Platelets", aliases: ["PLATELET", "PLATELETS", "PLT"] },
-  { canonicalKey: "esr", displayLabel: "ESR", aliases: ["ESR", "ERYTHROCYTE SEDIMENTATION"] },
-  { canonicalKey: "sgpt", displayLabel: "SGPT / ALT", aliases: ["SGPT", "ALT (SGPT) SERUM", "ALT (SGPT)", "ALT", "ALANINE AMINOTRANSFERASE"] },
-  { canonicalKey: "creatinine", displayLabel: "S. Creatinine", aliases: ["S. CREATININE", "SERUM CREATININE", "CREATININE", "S.CREAT"] },
-  { canonicalKey: "rbs", displayLabel: "RBS (Random Blood Sugar)", aliases: ["RBS", "RANDOM BLOOD SUGAR", "BLOOD GLUCOSE RANDOM", "GLUCOSE RANDOM"] },
-  { canonicalKey: "hba1c", displayLabel: "HbA1c", aliases: ["HBA1C", "GLYCOSYLATED HEMOGLOBIN", "A1C"] },
-  { canonicalKey: "widal", displayLabel: "Widal Profile", aliases: ["WIDAL", "WIDAL TEST", "WIDAL PROFILE"] },
-  { canonicalKey: "bloodGroup", displayLabel: "Blood Group", aliases: ["BLOOD GROUP", "ABO GROUP", "BLOOD TYPE"] },
+  { canonicalKey: "hb", displayLabel: "Hemoglobin (Hb)", unit: "g/dL", normalMin: "12", normalMax: "16", normalText: "", aliases: ["HAEMOGLOBIN (HB)", "HEMOGLOBIN", "HAEMOGLOBIN", "HB"] },
+  { canonicalKey: "wbc", displayLabel: "WBC / TLC", unit: "10^3/uL", normalMin: "4.0", normalMax: "10.0", normalText: "", aliases: ["TOTAL LEUCOCYTE COUNT (TLC)", "TOTAL LEUCOCYTE COUNT", "WBC", "TLC", "WHITE BLOOD CELL"] },
+  { canonicalKey: "platelets", displayLabel: "Platelets", unit: "10^3/µl", normalMin: "150", normalMax: "410", normalText: "", aliases: ["PLATELET COUNT(PLT)", "PLATELET COUNT", "PLATELETS", "PLATELET", "PLT"] },
+  { canonicalKey: "esr", displayLabel: "ESR", unit: "mm/hr", normalMin: "0", normalMax: "12", normalText: "", aliases: ["ERYTHROCYTE SEDIMENTATION RATE", "ESR"] },
+  { canonicalKey: "sgpt", displayLabel: "SGPT / ALT", unit: "U/L", normalMin: "3", normalMax: "35", normalText: "", aliases: ["ALANINE AMINOTRANSFERASE (ALT/SGPT)", "ALT (SGPT) SERUM", "ALT (SGPT)", "SGPT", "ALT"] },
+  { canonicalKey: "creatinine", displayLabel: "S. Creatinine", unit: "mg/dl", normalMin: "0.3", normalMax: "1.2", normalText: "", aliases: ["SERUM CREATININE", "S. CREATININE", "S.CREAT", "CREATININE"] },
+  { canonicalKey: "rbs", displayLabel: "RBS / FBS (Blood Sugar)", unit: "mg/dl", normalMin: "70", normalMax: "140", normalText: "", aliases: ["GLUCOSE, FASTING", "FASTING BLOOD SUGAR", "RANDOM BLOOD SUGAR", "BLOOD GLUCOSE RANDOM", "RBS", "FBS"] },
+  { canonicalKey: "hba1c", displayLabel: "HbA1c", unit: "%", normalMin: "4.2", normalMax: "5.7", normalText: "", aliases: ["HBA1C (GLYCOSYLATED HEMOGLOBIN)", "GLYCOSYLATED HEMOGLOBIN", "HBA1C"] },
+  { canonicalKey: "widal", displayLabel: "Widal Profile", unit: "", normalMin: "", normalMax: "", normalText: "Negative", aliases: ["WIDAL PROFILE", "WIDAL TEST", "WIDAL"] },
+  { canonicalKey: "bloodGroup", displayLabel: "Blood Group", unit: "", normalMin: "", normalMax: "", normalText: "", aliases: ["BLOOD GROUP", "ABO GROUP", "BLOOD TYPE"] },
+  { canonicalKey: "urineRm", displayLabel: "Urine R/M", unit: "", normalMin: "", normalMax: "", normalText: "Normal", aliases: ["URINE ROUTINE", "URINE R/M", "PUS CELLS"] },
 ];
 
 export async function getLabParameterAliases() {
@@ -46,6 +50,10 @@ export async function getLabParameterAliases() {
 export async function saveLabParameterAlias(params: {
   canonicalKey: string;
   displayLabel: string;
+  unit?: string;
+  normalMin?: string;
+  normalMax?: string;
+  normalText?: string;
   aliases: string[];
 }) {
   try {
@@ -57,6 +65,10 @@ export async function saveLabParameterAlias(params: {
         id: `alias_${nanoid(8)}`,
         canonicalKey: cleanKey,
         displayLabel: params.displayLabel.trim(),
+        unit: params.unit?.trim() || null,
+        normalMin: params.normalMin?.trim() || null,
+        normalMax: params.normalMax?.trim() || null,
+        normalText: params.normalText?.trim() || null,
         aliases: cleanAliases,
         updatedAt: new Date(),
       })
@@ -64,12 +76,17 @@ export async function saveLabParameterAlias(params: {
         target: labParameterAliases.canonicalKey,
         set: {
           displayLabel: params.displayLabel.trim(),
+          unit: params.unit?.trim() || null,
+          normalMin: params.normalMin?.trim() || null,
+          normalMax: params.normalMax?.trim() || null,
+          normalText: params.normalText?.trim() || null,
           aliases: cleanAliases,
           updatedAt: new Date(),
         },
       });
     revalidatePath("/admin/services");
     revalidatePath("/lab");
+    revalidatePath("/doctor/office");
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -310,9 +327,10 @@ export async function saveDiagnosticResult(params: {
 }
 
 // Deduplicated Lab Queue with each employee's own saved lab values
+// Last Updated: 20-11-2026 15:53 IST
 export async function getLabQueue(campId: string) {
   try {
-    const [rows, labRecords] = await Promise.all([
+    const [rows, labRecords, campRows, allServices] = await Promise.all([
       db
         .select({
           employeeId: employees.id,
@@ -326,6 +344,7 @@ export async function getLabQueue(campId: string) {
           heightCm: employees.heightCm,
           weightKg: employees.weightKg,
           bmi: employees.bmi,
+          assignedServiceIds: employees.assignedServiceIds,
           labKitBarcode: employees.labKitBarcode,
           bloodCollected: employees.bloodCollected,
           urineCollected: employees.urineCollected,
@@ -351,8 +370,21 @@ export async function getLabQueue(campId: string) {
         .from(diagnosticRecords)
         .where(and(eq(diagnosticRecords.campId, campId), eq(diagnosticRecords.station, "PATHOLOGY_LAB")))
         .orderBy(desc(diagnosticRecords.createdAt)),
+      db.select({ packageId: camps.packageId }).from(camps).where(eq(camps.id, campId)).limit(1),
+      db.select().from(services).where(eq(services.isActive, true)),
     ]);
 
+    let campServiceIds: string[] = [];
+    if (campRows[0]?.packageId) {
+      const pkg = await db
+        .select({ activeServiceIds: clientPackages.activeServiceIds })
+        .from(clientPackages)
+        .where(eq(clientPackages.id, campRows[0].packageId))
+        .limit(1);
+      campServiceIds = pkg[0]?.activeServiceIds || [];
+    }
+
+    const serviceMap = new Map(allServices.map((s) => [s.id, s]));
     const recordMap = new Map<string, any>();
     for (const rec of labRecords) {
       if (!recordMap.has(rec.employeeId)) recordMap.set(rec.employeeId, rec);
@@ -364,12 +396,22 @@ export async function getLabQueue(campId: string) {
       if (!seen.has(r.employeeId)) {
         seen.add(r.employeeId);
         const savedRec = recordMap.get(r.employeeId);
+        const empServiceIds =
+          Array.isArray(r.assignedServiceIds) && r.assignedServiceIds.length > 0
+            ? r.assignedServiceIds
+            : campServiceIds;
+
+        const contractedLabServices = empServiceIds
+          .map((id) => serviceMap.get(id))
+          .filter((s): s is NonNullable<typeof s> => Boolean(s && s.station === "PATHOLOGY_LAB"));
+
         uniqueQueue.push({
           ...r,
           agencyName: r.agencyName || "Direct Payroll",
           checklistStatus: r.checklistStatus || "PENDING",
           arrivalStatus: r.arrivalStatus || "PENDING",
           isLocked: Boolean(r.isLocked),
+          contractedLabServices,
           savedLabData: savedRec?.structuredData || null,
           savedFindings: savedRec?.findingsSummary || null,
           savedAbnormal: Boolean(savedRec?.isAbnormal),
@@ -447,9 +489,10 @@ export async function getLabMismatchAlerts(campId?: string) {
   }
 }
 
+// Last Updated: 20-11-2026 15:53 IST
 export async function getEmployeeFullDossier(employeeId: string, campId: string) {
   try {
-    const [empRows, fieldExamRows, diagRows, reviewRows] = await Promise.all([
+    const [empRows, fieldExamRows, diagRows, reviewRows, campRows, allServices] = await Promise.all([
       db
         .select({ employee: employees, agencyName: agencies.name })
         .from(employees)
@@ -462,14 +505,35 @@ export async function getEmployeeFullDossier(employeeId: string, campId: string)
         .from(diagnosticRecords)
         .where(and(eq(diagnosticRecords.employeeId, employeeId), eq(diagnosticRecords.campId, campId))),
       db.select().from(doctorReviews).where(eq(doctorReviews.employeeId, employeeId)).limit(1),
+      db.select({ packageId: camps.packageId }).from(camps).where(eq(camps.id, campId)).limit(1),
+      db.select().from(services).where(eq(services.isActive, true)),
     ]);
 
+    let campServiceIds: string[] = [];
+    if (campRows[0]?.packageId) {
+      const pkg = await db
+        .select({ activeServiceIds: clientPackages.activeServiceIds })
+        .from(clientPackages)
+        .where(eq(clientPackages.id, campRows[0].packageId))
+        .limit(1);
+      campServiceIds = pkg[0]?.activeServiceIds || [];
+    }
+
+    const emp = empRows[0]?.employee || null;
+    const effectiveIds =
+      emp?.assignedServiceIds && emp.assignedServiceIds.length > 0
+        ? emp.assignedServiceIds
+        : campServiceIds;
+
+    const contractedServices = allServices.filter((s) => effectiveIds.includes(s.id));
+
     return {
-      employee: empRows[0]?.employee || null,
+      employee: emp,
       agencyName: empRows[0]?.agencyName || "Direct Payroll",
       fieldExam: fieldExamRows[0] || null,
       diagnostics: diagRows,
       review: reviewRows[0] || null,
+      contractedServices,
     };
   } catch {
     return null;
