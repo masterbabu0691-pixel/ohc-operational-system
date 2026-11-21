@@ -1,3 +1,4 @@
+// Last Updated: 21-11-2026 16:52 IST
 // src/app/admin/page.tsx
 "use client";
 
@@ -41,12 +42,14 @@ export default function CampMonitorDashboardPage() {
   };
 
   const pipeline = data?.pipeline || {
+    totalClients: 0,
     totalRoster: 0,
     preRegistered: 0,
-    phlebotomyQueue: 0,
-    doctorQueue: 0,
-    finalReview: 0,
-    completed: 0,
+    receptionDone: 0,
+    nurseDone: 0,
+    phleboDone: 0,
+    doctorDone: 0,
+    labDone: 0,
   };
 
   const diagnostics = data?.diagnostics || {
@@ -137,36 +140,40 @@ export default function CampMonitorDashboardPage() {
         </Link>
       )}
 
-      {/* 2. CORE CLINICAL PIPELINE */}
+      {/* 2. CORE CLINICAL PIPELINE (7 Cards) */}
       <div className="space-y-2 shrink-0">
         <h2 className="text-xs font-black text-[#002642] tracking-wider uppercase border-b border-slate-100 pb-1">
-          CORE CLINICAL PIPELINE {selectedClientId !== "all" && `• ${activeClientName}`}
+          CORE CLINICAL PIPELINE {selectedClientId !== "all" && `• ${activeClientName}`} (Roster: {pipeline.totalRoster})
         </h2>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5">
           <div className="bg-white border border-slate-200 rounded-xl p-3 shadow-xs">
-            <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">TOTAL ROSTER</span>
-            <span className="block text-xl font-black text-[#002642] font-mono mt-0.5">{pipeline.totalRoster}</span>
+            <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">TOTAL CLIENT</span>
+            <span className="block text-xl font-black text-[#002642] font-mono mt-0.5">{pipeline.totalClients}</span>
           </div>
           <div className="bg-white border border-slate-200 border-l-4 border-l-cyan-500 rounded-xl p-3 shadow-xs">
             <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">PRE-REGISTERED</span>
             <span className="block text-xl font-black text-cyan-600 font-mono mt-0.5">{pipeline.preRegistered}</span>
           </div>
-          <div className="bg-white border border-slate-200 border-l-4 border-l-red-500 rounded-xl p-3 shadow-xs">
-            <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">PHLEBOTOMY</span>
-            <span className="block text-xl font-black text-red-500 font-mono mt-0.5">{pipeline.phlebotomyQueue}</span>
+          <div className="bg-white border border-slate-200 border-l-4 border-l-teal-500 rounded-xl p-3 shadow-xs">
+            <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">RECEPTION</span>
+            <span className="block text-xl font-black text-teal-600 font-mono mt-0.5">{pipeline.receptionDone}</span>
+          </div>
+          <div className="bg-white border border-slate-200 border-l-4 border-l-indigo-500 rounded-xl p-3 shadow-xs">
+            <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">NURSE</span>
+            <span className="block text-xl font-black text-indigo-600 font-mono mt-0.5">{pipeline.nurseDone}</span>
+          </div>
+          <div className="bg-white border border-slate-200 border-l-4 border-l-rose-500 rounded-xl p-3 shadow-xs">
+            <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">PHLEBO</span>
+            <span className="block text-xl font-black text-rose-600 font-mono mt-0.5">{pipeline.phleboDone}</span>
           </div>
           <div className="bg-white border border-slate-200 border-l-4 border-l-amber-500 rounded-xl p-3 shadow-xs">
-            <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">DOCTOR QUEUE</span>
-            <span className="block text-xl font-black text-amber-500 font-mono mt-0.5">{pipeline.doctorQueue}</span>
-          </div>
-          <div className="bg-white border border-slate-200 border-l-4 border-l-purple-500 rounded-xl p-3 shadow-xs">
-            <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">FINAL REVIEW</span>
-            <span className="block text-xl font-black text-purple-600 font-mono mt-0.5">{pipeline.finalReview}</span>
+            <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">DOCTOR</span>
+            <span className="block text-xl font-black text-amber-600 font-mono mt-0.5">{pipeline.doctorDone}</span>
           </div>
           <div className="bg-white border border-slate-200 border-l-4 border-l-emerald-500 rounded-xl p-3 shadow-xs">
-            <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">COMPLETED</span>
-            <span className="block text-xl font-black text-emerald-500 font-mono mt-0.5">{pipeline.completed}</span>
+            <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">LABORATORY</span>
+            <span className="block text-xl font-black text-emerald-600 font-mono mt-0.5">{pipeline.labDone}</span>
           </div>
         </div>
       </div>

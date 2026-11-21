@@ -1,13 +1,13 @@
+// Last Updated: 21-11-2026 16:14 IST
 // src/actions/camp-actions.ts
 "use server";
 
 import { db } from "@/db";
-import { camps, clients, clientPackages, agencies, employees } from "@/db/schema";
+import { camps, clients, clientPackages, agencies, employees, services } from "@/db/schema";
 import { nanoid } from "nanoid";
 import { revalidatePath } from "next/cache";
 import { eq, desc } from "drizzle-orm";
 
-// 1. Get all clients with their contracted packages
 export async function getClientsForCamp() {
   try {
     const allClients = await db.select().from(clients).where(eq(clients.isActive, true));
@@ -39,7 +39,6 @@ export async function getClientsForCamp() {
   }
 }
 
-// 2. Schedule a new medical camp
 export async function createCamp(formData: {
   clientId: string;
   packageId: string;
@@ -72,7 +71,6 @@ export async function createCamp(formData: {
   }
 }
 
-// 3. Get all active camps WITH Client Names
 export async function getCampsList() {
   try {
     return await db
@@ -91,12 +89,11 @@ export async function getCampsList() {
       .from(camps)
       .innerJoin(clients, eq(camps.clientId, clients.id))
       .orderBy(desc(camps.createdAt));
-  } catch (err) {
+  } catch {
     return [];
   }
 }
 
-// 4. Batch Bulk Upload Employees with Client-Isolated Pre-Reg IDs
 export async function bulkUploadEmployees(
   campId: string,
   clientId: string,
@@ -110,30 +107,70 @@ export async function bulkUploadEmployees(
     agencyName?: string;
     phone?: string;
     bloodGroup?: string;
+    tests?: string;
   }>
 ) {
   try {
-    // 1. Fetch agencies strictly for THIS client
-    const clientAgencies = await db
-      .select()
-      .from(agencies)
-      .where(eq(agencies.clientId, clientId));
+    const [clientAgencies, campRows, allServices] = await Promise.all([
+      db.select().from(agencies).where(eq(agencies.clientId, clientId)),
+      db.select({ packageId: camps.packageId }).from(camps).where(eq(camps.id, campId)).limit(1),
+      db.select().from(services).where(eq(services.isActive, true)),
+    ]);
+
+    let basePackageServiceIds: string[] = [];
+    if (campRows[0]?.packageId) {
+      const pkg = await db
+        .select({ activeServiceIds: clientPackages.activeServiceIds })
+        .from(clientPackages)
+        .where(eq(clientPackages.id, campRows[0].packageId))
+        .limit(1);
+      basePackageServiceIds = pkg[0]?.activeServiceIds || [];
+    }
 
     const defaultAgency = clientAgencies[0]?.id || null;
 
-    // 2. Prepare batch records with client-scoped unique IDs
     const recordsToInsert = rows
       .filter((r) => r.empCode && r.fullName)
       .map((row) => {
-        // Find matching agency or fallback
         const matchedAgency =
           clientAgencies.find(
             (a) => a.name.toLowerCase() === (row.agencyName || "").trim().toLowerCase()
           )?.id || defaultAgency;
 
         const cleanCode = row.empCode.trim().toUpperCase();
-        // Client-scoped pre-reg UHID prevents collisions between Client A and Client B
         const uniquePreUhid = `PRE-${clientId.slice(-4)}-${cleanCode}-${nanoid(4)}`;
+
+        let assignedServiceIds: string[] | null = null;
+        let specialContainerRequired = false;
+        let specialContainerName: string | null = null;
+
+        if (row.tests && row.tests.trim()) {
+          const tokens = row.tests
+            .split(/[,;|]+/)
+            .map((t) => t.trim().toLowerCase())
+            .filter(Boolean);
+
+          const extraIds: string[] = [];
+          for (const tok of tokens) {
+            const matchedSrv = allServices.find(
+              (s) =>
+                s.code.toLowerCase() === tok ||
+                s.id.toLowerCase() === tok ||
+                s.name.toLowerCase().includes(tok)
+            );
+            if (matchedSrv) {
+              extraIds.push(matchedSrv.id);
+              if (matchedSrv.subCategory === "Special Test") {
+                specialContainerRequired = true;
+                specialContainerName = matchedSrv.name;
+              }
+            }
+          }
+
+          if (extraIds.length > 0) {
+            assignedServiceIds = Array.from(new Set([...basePackageServiceIds, ...extraIds]));
+          }
+        }
 
         return {
           id: `emp_${nanoid(10)}`,
@@ -149,6 +186,9 @@ export async function bulkUploadEmployees(
           designation: row.designation?.trim() || null,
           phone: row.phone?.trim() || null,
           bloodGroup: row.bloodGroup?.trim() || null,
+          assignedServiceIds,
+          specialContainerRequired,
+          specialContainerName,
           checkInStatus: "PRE_REGISTERED" as const,
         };
       });

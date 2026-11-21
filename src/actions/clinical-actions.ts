@@ -1169,3 +1169,117 @@ export async function getPhlebotomyExportRoster(campId: string, carriedOnly: boo
     return null;
   }
 }
+// Last Updated: 21-11-2026 16:14 IST
+export async function lookupEmployeeForCoordinator(campId: string, query: string) {
+  try {
+    const clean = query.trim().toUpperCase();
+    if (!clean) return null;
+    const empRows = await db
+      .select({
+        id: employees.id,
+        uhid: employees.uhid,
+        empCode: employees.empCode,
+        fullName: employees.fullName,
+        assignedServiceIds: employees.assignedServiceIds,
+        barcodeLocked: employees.barcodeLocked,
+      })
+      .from(employees)
+      .where(
+        and(
+          eq(employees.campId, campId),
+          sql`(${employees.uhid} = ${clean} OR ${employees.empCode} = ${clean})`
+        )
+      )
+      .limit(1);
+
+    if (empRows.length === 0) return null;
+    const emp = empRows[0];
+
+    const [checklists, allServices] = await Promise.all([
+      db
+        .select({
+          station: stationChecklist.station,
+          arrivalStatus: stationChecklist.arrivalStatus,
+          isLocked: stationChecklist.isLocked,
+        })
+        .from(stationChecklist)
+        .where(and(eq(stationChecklist.employeeId, emp.id), eq(stationChecklist.campId, campId))),
+      db.select().from(services).where(eq(services.isActive, true)),
+    ]);
+
+    return { employee: emp, checklists, services: allServices };
+  } catch {
+    return null;
+  }
+}
+
+export async function coordinatorDirectTestOverride(params: {
+  campId: string;
+  employeeId: string;
+  serviceId?: string;
+  unlockStation?: (typeof stationTypeEnum.enumValues)[number];
+}) {
+  try {
+    const session = await getSession();
+    if (!session || !["SUPER_ADMIN", "CAMP_COORDINATOR"].includes(session.role)) {
+      return { success: false, error: "Unauthorized: Only Super Admin or Camp Coordinator can perform direct overrides." };
+    }
+
+    if (params.serviceId) {
+      const [empRows, srvRows] = await Promise.all([
+        db.select({ assignedServiceIds: employees.assignedServiceIds }).from(employees).where(eq(employees.id, params.employeeId)).limit(1),
+        db.select().from(services).where(eq(services.id, params.serviceId)).limit(1),
+      ]);
+      const srv = srvRows[0];
+      if (!srv) return { success: false, error: "Service not found." };
+
+      const existingIds = empRows[0]?.assignedServiceIds || [];
+      const nextIds = Array.from(new Set([...existingIds, srv.id]));
+      await db.update(employees).set({ assignedServiceIds: nextIds }).where(eq(employees.id, params.employeeId));
+
+      await db
+        .insert(stationChecklist)
+        .values({
+          id: `chk_${nanoid(10)}`,
+          employeeId: params.employeeId,
+          campId: params.campId,
+          station: srv.station,
+          arrivalStatus: "PENDING",
+          isLocked: false,
+        })
+        .onConflictDoNothing();
+    }
+
+    if (params.unlockStation) {
+      await db
+        .update(stationChecklist)
+        .set({ isLocked: false })
+        .where(
+          and(
+            eq(stationChecklist.employeeId, params.employeeId),
+            eq(stationChecklist.campId, params.campId),
+            eq(stationChecklist.station, params.unlockStation)
+          )
+        );
+      if (params.unlockStation === "PHLEBOTOMY") {
+        await db.update(employees).set({ barcodeLocked: false }).where(eq(employees.id, params.employeeId));
+      }
+    }
+
+    await db.insert(auditLogs).values({
+      userId: session.userId,
+      userRole: session.role,
+      action: "HIGH_MGMT_DIRECT_TEST_OVERRIDE",
+      entityType: "EMPLOYEE",
+      entityId: params.employeeId,
+      newState: params,
+    });
+
+    revalidatePath("/coordinator");
+    revalidatePath("/diagnostics");
+    revalidatePath("/lab");
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}

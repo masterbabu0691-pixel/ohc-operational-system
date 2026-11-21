@@ -1,3 +1,4 @@
+// Last Updated: 21-11-2026 16:52 IST
 // src/app/camps/page.tsx
 "use client";
 
@@ -17,7 +18,6 @@ export default function CampsPage() {
   const [startDate, setStartDate] = useState(new Date().toISOString().split("T")[0]);
   const [endDate, setEndDate] = useState(new Date().toISOString().split("T")[0]);
 
-  // Bulk Upload State
   const [targetCampId, setTargetCampId] = useState("");
   const [parsedRows, setParsedRows] = useState<any[]>([]);
   const [fileName, setFileName] = useState("");
@@ -90,17 +90,20 @@ export default function CampsPage() {
       const ws = wb.Sheets[wsname];
       const data: any[] = XLSX.utils.sheet_to_json(ws);
 
-      const formatted = data.map((row: any) => ({
-        empCode: String(row["Emp Code"] || row["Employee Code"] || row["emp_code"] || "").trim(),
-        fullName: String(row["Full Name"] || row["Name"] || row["full_name"] || "").trim(),
-        age: Number(row["Age"] || row["age"] || 30),
-        gender: String(row["Gender"] || row["gender"] || "MALE").toUpperCase(),
-        department: String(row["Department"] || row["dept"] || ""),
-        designation: String(row["Designation"] || row["role"] || ""),
-        agencyName: String(row["Agency"] || row["Contractor"] || ""),
-        phone: String(row["Phone"] || row["Mobile"] || ""),
-        bloodGroup: String(row["Blood Group"] || row["blood_group"] || ""),
-      })).filter((r) => r.empCode && r.fullName);
+      const formatted = data
+        .map((row: any) => ({
+          empCode: String(row["Emp Code"] || row["Employee Code"] || row["emp_code"] || "").trim(),
+          fullName: String(row["Full Name"] || row["Name"] || row["full_name"] || "").trim(),
+          age: Number(row["Age"] || row["age"] || 30),
+          gender: String(row["Gender"] || row["gender"] || "MALE").toUpperCase(),
+          department: String(row["Department"] || row["dept"] || ""),
+          designation: String(row["Designation"] || row["role"] || ""),
+          agencyName: String(row["Agency"] || row["Contractor"] || ""),
+          phone: String(row["Phone"] || row["Mobile"] || ""),
+          bloodGroup: String(row["Blood Group"] || row["blood_group"] || ""),
+          tests: String(row["Tests"] || row["Assigned Tests"] || row["Service Codes"] || ""),
+        }))
+        .filter((r) => r.empCode && r.fullName);
 
       setParsedRows(formatted);
     };
@@ -145,6 +148,7 @@ export default function CampsPage() {
         "Agency": "Direct Payroll",
         "Phone": "9876543210",
         "Blood Group": "B+ve",
+        "Tests": "SRV_XRAY, SRV_PFT",
       },
       {
         "Emp Code": "TM-1002",
@@ -156,6 +160,7 @@ export default function CampsPage() {
         "Agency": "Apex Labor Services",
         "Phone": "9876543211",
         "Blood Group": "O+ve",
+        "Tests": "",
       },
     ];
 
@@ -168,11 +173,8 @@ export default function CampsPage() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-6 md:p-10 space-y-6">
       <div className="max-w-6xl mx-auto space-y-6">
-        
-        {/* Back and Home Shortcut */}
         <BackButton fallbackHref="/admin" label="Back to Dashboard" />
 
-        {/* Header */}
         <div className="border-b border-slate-200 pb-5">
           <div className="flex items-center space-x-2 text-indigo-600 font-semibold text-sm">
             <Calendar className="w-4 h-4" />
@@ -182,7 +184,7 @@ export default function CampsPage() {
             Schedule Camp & Bulk Pre-Registration
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            Create on-field medical camps linked to client service packages and bulk upload employee manifests via Excel.
+            Create on-field medical camps linked to client service packages and bulk upload employee manifests (with optional Tests column).
           </p>
         </div>
 
@@ -194,7 +196,6 @@ export default function CampsPage() {
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Schedule Camp Card */}
           <form onSubmit={handleCreateCamp} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-5">
             <h2 className="text-lg font-semibold text-slate-800 flex items-center space-x-2">
               <Plus className="w-5 h-5 text-indigo-500" />
@@ -286,7 +287,6 @@ export default function CampsPage() {
             </button>
           </form>
 
-          {/* Bulk Upload Card */}
           <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-5 flex flex-col justify-between">
             <div className="space-y-4">
               <div className="flex items-center justify-between">
@@ -333,7 +333,7 @@ export default function CampsPage() {
                     {fileName ? fileName : "Click to browse or drop Excel spreadsheet"}
                   </span>
                   <span className="text-xs text-slate-400 mt-1 block">
-                    Supports .xlsx, .xls with Emp Code, Full Name, Age, Gender, Department
+                    Supports .xlsx, .xls with Emp Code, Full Name, Age, Gender, Department, and optional Tests
                   </span>
                 </label>
               </div>
@@ -344,7 +344,7 @@ export default function CampsPage() {
                     <span>{parsedRows.length} employees parsed ready to upload</span>
                   </div>
                   <div className="text-slate-500 truncate">
-                    Sample: {parsedRows[0].fullName} ({parsedRows[0].empCode}) - {parsedRows[0].department}
+                    Sample: {parsedRows[0].fullName} ({parsedRows[0].empCode}) {parsedRows[0].tests ? `• Tests: ${parsedRows[0].tests}` : ""}
                   </div>
                 </div>
               )}

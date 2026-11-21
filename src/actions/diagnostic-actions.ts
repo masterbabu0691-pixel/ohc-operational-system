@@ -112,6 +112,7 @@ export async function getDiagnosticTechnicianScope() {
   }
 }
 
+// Last Updated: 21-11-2026 16:14 IST
 export async function getStationQueue(
   campId: string,
   station: (typeof stationTypeEnum.enumValues)[number]
@@ -126,7 +127,6 @@ export async function getStationQueue(
         age: employees.age,
         gender: employees.gender,
         department: employees.department,
-        photoUrl: employees.photoUrl,
         heightCm: employees.heightCm,
         weightKg: employees.weightKg,
         bmi: employees.bmi,

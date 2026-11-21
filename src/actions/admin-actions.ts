@@ -22,7 +22,8 @@ import {
   stationTypeEnum,
   roleEnum,
 } from "@/db/schema";
-import { eq, sql, and, desc, isNull } from "drizzle-orm";
+// Last Updated: 21-11-2026 16:14 IST
+import { eq, sql, and, desc, isNull, inArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { revalidatePath } from "next/cache";
 import bcrypt from "bcryptjs";
@@ -612,19 +613,21 @@ export async function getAdminCampRoster(campId: string = "all") {
 }
 
 // 6. Vyora Camp Monitor Metrics
+// Last Updated: 21-11-2026 16:14 IST
 export async function getCampMonitorMetrics(
   selectedClientId: string = "all",
   selectedCampId: string = "all"
 ) {
   try {
-    const allClients = await db
-      .select({ id: clients.id, name: clients.name, code: clients.code })
-      .from(clients)
-      .where(eq(clients.isActive, true));
-
-    const allCamps = await db
-      .select({ id: camps.id, name: camps.name, clientId: camps.clientId, packageId: camps.packageId })
-      .from(camps);
+    const [allClients, allCamps] = await Promise.all([
+      db
+        .select({ id: clients.id, name: clients.name, code: clients.code })
+        .from(clients)
+        .where(eq(clients.isActive, true)),
+      db
+        .select({ id: camps.id, name: camps.name, clientId: camps.clientId, packageId: camps.packageId })
+        .from(camps),
+    ]);
 
     let targetClientId: string | null = selectedClientId !== "all" ? selectedClientId : null;
     const targetCampId: string | null = selectedCampId !== "all" ? selectedCampId : null;
@@ -663,44 +666,89 @@ export async function getCampMonitorMetrics(
       );
     };
 
-    let allEmps = [];
-    if (targetCampId) {
-      allEmps = await db
-        .select({ id: employees.id, clientId: employees.clientId, campId: employees.campId, checkInStatus: employees.checkInStatus })
-        .from(employees)
-        .where(eq(employees.campId, targetCampId));
-    } else if (targetClientId) {
-      allEmps = await db
-        .select({ id: employees.id, clientId: employees.clientId, campId: employees.campId, checkInStatus: employees.checkInStatus })
-        .from(employees)
-        .where(eq(employees.clientId, targetClientId));
-    } else {
-      allEmps = await db
-        .select({ id: employees.id, clientId: employees.clientId, campId: employees.campId, checkInStatus: employees.checkInStatus })
-        .from(employees);
-    }
+    const empSelect = {
+      id: employees.id,
+      clientId: employees.clientId,
+      campId: employees.campId,
+      checkInStatus: employees.checkInStatus,
+      nurseRecordedAt: employees.nurseRecordedAt,
+    };
+
+    const allEmps = targetCampId
+      ? await db.select(empSelect).from(employees).where(eq(employees.campId, targetCampId))
+      : targetClientId
+      ? await db.select(empSelect).from(employees).where(eq(employees.clientId, targetClientId))
+      : await db.select(empSelect).from(employees);
 
     const totalRoster = allEmps.length;
     const preRegistered = allEmps.filter((e) => e.checkInStatus === "PRE_REGISTERED").length;
     const checkedIn = allEmps.filter((e) => e.checkInStatus === "CHECKED_IN").length;
+    const nurseDone = allEmps.filter((e) => Boolean(e.nurseRecordedAt)).length;
     const employeeIds = allEmps.map((e) => e.id);
 
-    const allDiagnostics = await db.select().from(diagnosticRecords);
-    const scopedDiagnostics = allDiagnostics.filter((d) => employeeIds.includes(d.employeeId));
+    const scopedDiagnostics =
+      employeeIds.length === 0
+        ? []
+        : targetCampId
+        ? await db
+            .select({ employeeId: diagnosticRecords.employeeId, station: diagnosticRecords.station })
+            .from(diagnosticRecords)
+            .where(eq(diagnosticRecords.campId, targetCampId))
+        : await db
+            .select({ employeeId: diagnosticRecords.employeeId, station: diagnosticRecords.station })
+            .from(diagnosticRecords)
+            .where(inArray(diagnosticRecords.employeeId, employeeIds));
 
-    const allReviews = await db.select().from(doctorReviews);
-    const scopedReviews = allReviews.filter((r) => employeeIds.includes(r.employeeId));
+    const scopedChecklists =
+      employeeIds.length === 0
+        ? []
+        : targetCampId
+        ? await db
+            .select({
+              employeeId: stationChecklist.employeeId,
+              station: stationChecklist.station,
+              arrivalStatus: stationChecklist.arrivalStatus,
+            })
+            .from(stationChecklist)
+            .where(eq(stationChecklist.campId, targetCampId))
+        : await db
+            .select({
+              employeeId: stationChecklist.employeeId,
+              station: stationChecklist.station,
+              arrivalStatus: stationChecklist.arrivalStatus,
+            })
+            .from(stationChecklist)
+            .where(inArray(stationChecklist.employeeId, employeeIds));
+
+    const scopedReviews =
+      employeeIds.length === 0
+        ? []
+        : targetCampId
+        ? await db
+            .select({ employeeId: doctorReviews.employeeId, isSigned: doctorReviews.isSigned })
+            .from(doctorReviews)
+            .where(eq(doctorReviews.campId, targetCampId))
+        : await db
+            .select({ employeeId: doctorReviews.employeeId, isSigned: doctorReviews.isSigned })
+            .from(doctorReviews)
+            .where(inArray(doctorReviews.employeeId, employeeIds));
 
     const completed = scopedReviews.filter((r) => r.isSigned).length;
     const finalReview = scopedReviews.filter((r) => !r.isSigned).length;
-    const doctorQueue = Math.max(0, checkedIn - completed);
 
-    const phlebDoneEmps = new Set(
-      scopedDiagnostics
-        .filter((d) => d.station === "PHLEBOTOMY" || d.station === "PATHOLOGY_LAB")
-        .map((d) => d.employeeId)
+    const phlebDoneSet = new Set(
+      scopedChecklists
+        .filter((c) => c.station === "PHLEBOTOMY" && c.arrivalStatus === "COMPLETED")
+        .map((c) => c.employeeId)
     );
-    const phlebotomyQueue = Math.max(0, checkedIn - phlebDoneEmps.size);
+    const labDoneSet = new Set(
+      scopedDiagnostics.filter((d) => d.station === "PATHOLOGY_LAB").map((d) => d.employeeId)
+    );
+    const fieldDocDoneSet = new Set(
+      scopedChecklists
+        .filter((c) => c.station === "FIELD_DOCTOR_EXAM" && c.arrivalStatus === "COMPLETED")
+        .map((c) => c.employeeId)
+    );
 
     const getStationCounts = (stationName: string, serviceKeyword: string) => {
       const contracted = isStationContracted(serviceKeyword);
@@ -725,10 +773,16 @@ export async function getCampMonitorMetrics(
       clients: allClients,
       camps: allCamps,
       pipeline: {
+        totalClients: targetClientId ? 1 : allClients.length,
         totalRoster,
         preRegistered,
-        phlebotomyQueue,
-        doctorQueue,
+        receptionDone: checkedIn,
+        nurseDone,
+        phleboDone: phlebDoneSet.size,
+        doctorDone: fieldDocDoneSet.size,
+        labDone: labDoneSet.size,
+        phlebotomyQueue: Math.max(0, checkedIn - phlebDoneSet.size),
+        doctorQueue: Math.max(0, checkedIn - completed),
         finalReview,
         completed,
       },
