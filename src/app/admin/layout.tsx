@@ -1,3 +1,4 @@
+// Last Updated: 21-11-2026 17:02 IST
 // src/app/admin/layout.tsx
 "use client";
 
@@ -99,8 +100,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         </div>
       </aside>
 
-      {/* Main Single-Viewport Canvas */}
-      <main className="flex-1 p-4 md:p-6 h-full overflow-hidden flex flex-col justify-between bg-white">
+      {/* Scrollable Main Content Panel */}
+      <main className="flex-1 p-4 md:p-6 h-full overflow-y-auto bg-white">
         {children}
       </main>
     </div>
